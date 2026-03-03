@@ -43,59 +43,60 @@ from utils import (
     load_saved_embeddings,
 )
 from similarity import predict_with_prototypes
+from recognize import FrameVoter
 
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QColor, QImage, QPixmap, QPainter, QPalette, QBrush
 from PyQt5.QtWidgets import (
-    QApplication, QFrame, QGridLayout, QHBoxLayout,
+    QApplication, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout,
     QWidget, QGraphicsDropShadowEffect, QSlider,
 )
 
 # ── Internal ML config ──────────────────────────────────────────────
 SIMILARITY_METRIC = "cosine"
-THRESHOLD = 0.70
-CAMERA_INDEX = 0
+THRESHOLD         = 0.60
+VOTE_FRAMES       = 7
+CAMERA_INDEX      = 0
 EMBEDDING_BACKEND = "auto"
-ONNX_MODEL_PATH = "models/arcface.onnx"
-DATASET_DIR = "dataset"
-EMBEDDINGS_DIR = "embeddings"
+ONNX_MODEL_PATH   = "models/arcface.onnx"
+DATASET_DIR       = "dataset"
+EMBEDDINGS_DIR    = "embeddings"
 
 # ══════════════════════════════════════════════════════════════════════
 #  DESIGN SYSTEM — Neural Surveillance Terminal
 # ══════════════════════════════════════════════════════════════════════
 
-# Color Palette
-BG         = "#080C14"
-BG2        = "#0C1220"
-SURFACE    = "#0F1A2E"
-SURFACE2   = "#142035"
-PANEL      = "#0A1628"
-BORDER     = "#1E3A5F"
-BORDER2    = "#0D2545"
+BG        = "#080C14"
+BG2       = "#0C1220"
+SURFACE   = "#0F1A2E"
+SURFACE2  = "#142035"
+PANEL     = "#0A1628"
+BORDER    = "#1E3A5F"
+BORDER2   = "#0D2545"
 
-CYAN       = "#00D4FF"
-CYAN_DIM   = "rgba(0,212,255,0.12)"
+CYAN      = "#00D4FF"
+CYAN_DIM  = "rgba(0,212,255,0.12)"
 
-GREEN      = "#00FF88"
-GREEN_DIM  = "rgba(0,255,136,0.10)"
+GREEN     = "#00FF88"
+GREEN_DIM = "rgba(0,255,136,0.10)"
 
-RED        = "#FF3366"
-RED_DIM    = "rgba(255,51,102,0.12)"
+RED       = "#FF3366"
+RED_DIM   = "rgba(255,51,102,0.12)"
 
-AMBER      = "#FFAA00"
-AMBER_DIM  = "rgba(255,170,0,0.12)"
+AMBER     = "#FFAA00"
+AMBER_DIM = "rgba(255,170,0,0.12)"
 
-TEXT       = "#D0E4F7"
-TEXT_DIM   = "#4A7FA5"
-TEXT_MID   = "#7BA8CC"
+TEXT      = "#D0E4F7"
+TEXT_DIM  = "#4A7FA5"
+TEXT_MID  = "#7BA8CC"
 
-MONO_FONT  = "Consolas"
-SANS_FONT  = "Segoe UI"
+MONO_FONT = "Consolas"
+SANS_FONT = "Segoe UI"
 
 # ══════════════════════════════════════════════════════════════════════
-#  Stylesheet  — borders stripped from text/label sections
+#  Stylesheet
 # ══════════════════════════════════════════════════════════════════════
 STYLESHEET = f"""
 QMainWindow, QWidget {{
@@ -175,6 +176,10 @@ QSlider::handle:horizontal:hover {{ background: {CYAN}; }}
 """
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  Helper Widgets / Factories
+# ══════════════════════════════════════════════════════════════════════
+
 def _shadow(widget: QWidget, blur: int = 18):
     e = QGraphicsDropShadowEffect()
     e.setBlurRadius(blur)
@@ -191,18 +196,15 @@ def _btn(label: str, color: str = CYAN, parent=None) -> QPushButton:
     if color == CYAN:
         bg   = "qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #006680,stop:1 #004D66)"
         bg_h = "qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #0099CC,stop:1 #007AB8)"
-        text_col   = CYAN
-        border_col = CYAN
+        text_col = border_col = CYAN
     elif color == GREEN:
         bg   = "rgba(0,80,50,0.6)"
         bg_h = "rgba(0,120,70,0.8)"
-        text_col   = GREEN
-        border_col = GREEN
-    else:  # RED
+        text_col = border_col = GREEN
+    else:
         bg   = "rgba(100,20,40,0.6)"
         bg_h = "rgba(150,30,60,0.8)"
-        text_col   = RED
-        border_col = RED
+        text_col = border_col = RED
 
     btn.setStyleSheet(f"""
         QPushButton {{
@@ -230,17 +232,12 @@ def _btn(label: str, color: str = CYAN, parent=None) -> QPushButton:
 
 
 def _step_number(n: str) -> QLabel:
-    """Small monospace step badge — no background box."""
     lbl = QLabel(n)
     lbl.setFixedSize(28, 28)
     lbl.setAlignment(Qt.AlignCenter)
     lbl.setStyleSheet(f"""
-        color: {CYAN};
-        background: transparent;
-        border: none;
-        font-size: 11px;
-        font-weight: 700;
-        font-family: '{MONO_FONT}';
+        color: {CYAN}; background: transparent; border: none;
+        font-size: 11px; font-weight: 700; font-family: '{MONO_FONT}';
     """)
     return lbl
 
@@ -248,13 +245,9 @@ def _step_number(n: str) -> QLabel:
 def _section_title(text: str, color: str = CYAN) -> QLabel:
     lbl = QLabel(text.upper())
     lbl.setStyleSheet(f"""
-        color: {color};
-        font-size: 10px;
-        font-family: '{SANS_FONT}';
-        font-weight: 700;
-        letter-spacing: 2px;
-        background: transparent;
-        border: none;
+        color: {color}; font-size: 10px; font-family: '{SANS_FONT}';
+        font-weight: 700; letter-spacing: 2px;
+        background: transparent; border: none;
     """)
     return lbl
 
@@ -262,11 +255,8 @@ def _section_title(text: str, color: str = CYAN) -> QLabel:
 def _mono_label(text: str, size: int = 12, color: str = TEXT) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(f"""
-        color: {color};
-        font-family: '{MONO_FONT}';
-        font-size: {size}px;
-        background: transparent;
-        border: none;
+        color: {color}; font-family: '{MONO_FONT}';
+        font-size: {size}px; background: transparent; border: none;
     """)
     return lbl
 
@@ -290,11 +280,12 @@ def _divider() -> QFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Scan Line Overlay (decorative)
+#  Scan Line Overlay
 # ══════════════════════════════════════════════════════════════════════
 
 class ScanLineWidget(QWidget):
     """Animated horizontal scan line for cyberpunk visual effect."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -311,14 +302,13 @@ class ScanLineWidget(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        c = QColor(0, 212, 255, 18)
         p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(c))
+        p.setBrush(QBrush(QColor(0, 212, 255, 18)))
         p.drawRect(0, self._y, self.width(), 3)
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  Worker Threads — unchanged
+#  Worker Threads  (logic completely unchanged)
 # ══════════════════════════════════════════════════════════════════════
 
 class EnrollWorker(QThread):
@@ -329,42 +319,77 @@ class EnrollWorker(QThread):
 
     def __init__(self, name: str, num_images: int):
         super().__init__()
-        self.name = name
+        self.name       = name
         self.num_images = num_images
-        self._running = True
+        self._running   = True
 
-    def stop(self): self._running = False
+    def stop(self):
+        self._running = False
 
     def run(self):
         try:
-            detector = load_face_detector()
+            detector   = load_face_detector()
             person_dir = Path(DATASET_DIR) / self.name
             ensure_dir(person_dir)
             cap = (cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
-                   if sys.platform.startswith("win") else cv2.VideoCapture(CAMERA_INDEX))
+                   if sys.platform.startswith("win")
+                   else cv2.VideoCapture(CAMERA_INDEX))
             if not cap.isOpened():
                 self.error.emit("Could not open webcam. Check camera permissions.")
                 return
-            captured, frame_count, min_gap = 0, 0, 10
+
+            captured, frame_count, min_gap = 0, 0, 6
+            HINTS = {
+                1:  "Look straight at camera",
+                2:  "Tilt head slightly LEFT",
+                3:  "Tilt head slightly RIGHT",
+                4:  "Look straight, smile slightly",
+                5:  "Look straight (medium distance)",
+                6:  "Turn chin slightly UP",
+                7:  "Turn chin slightly DOWN",
+                8:  "Look straight (step back 2 m)",
+                9:  "Tilt head slightly LEFT (far)",
+                10: "Look straight, normal expression",
+            }
+            BLUR_THRESHOLD = 60.0
+
             while self._running and captured < self.num_images:
                 ok, frame = cap.read()
-                if not ok: continue
+                if not ok:
+                    continue
                 frame_count += 1
                 detections = detect_faces(frame, detector, min_confidence=0.90, padding=0.12)
                 for det in detections:
                     x1, y1, x2, y2 = det.box
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 212, 255), 2)
                 if detections and frame_count % min_gap == 0:
-                    largest = max(detections, key=lambda d:(d.box[2]-d.box[0])*(d.box[3]-d.box[1]))
+                    largest = max(detections,
+                                  key=lambda d: (d.box[2]-d.box[0])*(d.box[3]-d.box[1]))
+                    gray      = cv2.cvtColor(largest.face_rgb, cv2.COLOR_RGB2GRAY)
+                    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                    if sharpness < BLUR_THRESHOLD:
+                        cv2.putText(frame,
+                                    f"Too blurry — stay still  (sharp={sharpness:.0f})",
+                                    (10, frame.shape[0] - 12),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 80, 255), 2)
+                        self.frame_ready.emit(frame)
+                        cv2.waitKey(1)
+                        continue
                     face_bgr = cv2.cvtColor(largest.face_rgb, cv2.COLOR_RGB2BGR)
-                    fname = f"{self.name}_{int(time.time()*1000)}_{captured+1}.jpg"
+                    fname    = f"{self.name}_{int(time.time()*1000)}_{captured+1}.jpg"
                     cv2.imwrite(str(person_dir / fname), face_bgr)
                     captured += 1
                     self.face_captured.emit(largest.face_rgb, captured)
+
                 cv2.putText(frame, f"CAPTURED: {captured}/{self.num_images}",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 212, 255), 2)
+                next_hint = HINTS.get(captured + 1, "Look naturally")
+                cv2.putText(frame, f"Next: {next_hint}",
+                            (10, frame.shape[0] - 14),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.50, (200, 200, 80), 1)
                 self.frame_ready.emit(frame)
                 cv2.waitKey(1)
+
             cap.release()
             self.finished_signal.emit(captured)
         except Exception as e:
@@ -385,7 +410,8 @@ class TrainWorker(QThread):
                 return
             self.progress.emit(10)
             detector = load_face_detector()
-            embedder = FaceEmbedder(backend=EMBEDDING_BACKEND, onnx_model_path=ONNX_MODEL_PATH)
+            embedder = FaceEmbedder(backend=EMBEDDING_BACKEND,
+                                    onnx_model_path=ONNX_MODEL_PATH)
             self.progress.emit(25)
             all_embeddings, all_labels = [], []
             for i, folder in enumerate(folders):
@@ -394,17 +420,22 @@ class TrainWorker(QThread):
                         list(folder.glob("*.jpeg")))
                 for img_path in imgs:
                     img = cv2.imread(str(img_path))
-                    if img is None: continue
+                    if img is None:
+                        continue
                     dets = detect_faces(img, detector, min_confidence=0.80, padding=0.10)
-                    if not dets: continue
-                    largest = max(dets, key=lambda d:(d.box[2]-d.box[0])*(d.box[3]-d.box[1]))
+                    if not dets:
+                        continue
+                    largest = max(dets,
+                                  key=lambda d: (d.box[2]-d.box[0])*(d.box[3]-d.box[1]))
                     emb = embedder.embed_face(largest.face_rgb)
                     all_embeddings.append(emb)
                     all_labels.append(folder.name)
                 self.progress.emit(25 + int(65 * (i + 1) / len(folders)))
+
             if not all_embeddings:
                 self.error.emit("No usable face images found.")
                 return
+
             emb_arr = np.vstack(all_embeddings).astype(np.float32)
             lbl_arr = np.array(all_labels, dtype=str)
             np.save(Path(EMBEDDINGS_DIR) / "embeddings.npy", emb_arr)
@@ -413,7 +444,8 @@ class TrainWorker(QThread):
             np.save(Path(EMBEDDINGS_DIR) / "prototypes.npy",  protos)
             np.save(Path(EMBEDDINGS_DIR) / "class_names.npy", names)
             self.progress.emit(100)
-            self.finished_signal.emit(f"Trained on {len(emb_arr)} samples · {len(names)} identities")
+            self.finished_signal.emit(
+                f"Trained on {len(emb_arr)} samples · {len(names)} identities")
         except Exception as e:
             self.error.emit(str(e))
 
@@ -427,12 +459,14 @@ class RecognitionWorker(QThread):
         super().__init__()
         self._running = True
 
-    def stop(self): self._running = False
+    def stop(self):
+        self._running = False
 
     def run(self):
         try:
-            detector = load_face_detector()
-            embedder = FaceEmbedder(backend=EMBEDDING_BACKEND, onnx_model_path=ONNX_MODEL_PATH)
+            detector   = load_face_detector()
+            embedder   = FaceEmbedder(backend=EMBEDDING_BACKEND,
+                                      onnx_model_path=ONNX_MODEL_PATH)
             proto_path = Path(EMBEDDINGS_DIR) / "prototypes.npy"
             names_path = Path(EMBEDDINGS_DIR) / "class_names.npy"
             if proto_path.exists() and names_path.exists():
@@ -443,40 +477,60 @@ class RecognitionWorker(QThread):
                     Path(EMBEDDINGS_DIR) / "embeddings.npy",
                     Path(EMBEDDINGS_DIR) / "labels.npy")
                 prototypes, class_names = compute_class_prototypes(emb, lbl)
+
             if len(prototypes) == 0:
                 self.error.emit("No trained data. Run Step 2 first.")
                 return
-            cap = (cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
-                   if sys.platform.startswith("win") else cv2.VideoCapture(CAMERA_INDEX))
+
+            vf    = getattr(self, "live_vote_frames", VOTE_FRAMES)
+            voter = FrameVoter(window=vf, max_missed_frames=12)
+            cap   = (cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+                     if sys.platform.startswith("win")
+                     else cv2.VideoCapture(CAMERA_INDEX))
             if not cap.isOpened():
                 self.error.emit("Could not open webcam.")
                 return
+
             while self._running:
                 ok, frame = cap.read()
-                if not ok: continue
-                detections = detect_faces(frame, detector, min_confidence=0.88, padding=0.12)
+                if not ok:
+                    continue
+                detections = detect_faces(frame, detector,
+                                          min_confidence=0.88, padding=0.12)
+                voter.expire([d.box for d in detections])
                 for det in detections:
-                    embedding = embedder.embed_face(det.face_rgb)
-                    live_thr  = getattr(self, 'live_threshold', THRESHOLD)
-                    result = predict_with_prototypes(
-                        query_embedding=embedding, prototypes=prototypes,
-                        class_names=class_names, metric=SIMILARITY_METRIC, threshold=live_thr)
+                    embedding  = embedder.embed_face(det.face_rgb)
+                    live_thr   = getattr(self, "live_threshold", THRESHOLD)
+                    raw_result = predict_with_prototypes(
+                        query_embedding=embedding,
+                        prototypes=prototypes,
+                        class_names=class_names,
+                        metric=SIMILARITY_METRIC,
+                        threshold=live_thr)
+                    voted_name, voted_conf = voter.vote(
+                        box=det.box,
+                        name=str(raw_result["name"]),
+                        confidence=float(raw_result["confidence"]))
+
                     x1, y1, x2, y2 = det.box
-                    name   = str(result["name"])
-                    conf   = float(result["confidence"])
+                    name   = voted_name
+                    conf   = voted_conf
                     color  = (0, 255, 136) if name != "Unknown" else (51, 51, 255)
-                    status = "AUTHORIZED"   if name != "Unknown" else "UNKNOWN"
+                    status = "AUTHORIZED"  if name != "Unknown" else "UNKNOWN"
+
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    lbl_h   = 50
                     overlay = frame.copy()
-                    cv2.rectangle(overlay, (x1, max(0, y1 - lbl_h)), (x2, y1), (8, 12, 20), -1)
+                    cv2.rectangle(overlay, (x1, max(0, y1 - 50)), (x2, y1),
+                                  (8, 12, 20), -1)
                     cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
                     cv2.putText(frame, name, (x1 + 6, y1 - 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 235, 250), 2)
-                    cv2.putText(frame, f"{conf*100:.0f}% | {status}", (x1 + 6, y1 - 8),
+                    cv2.putText(frame, f"{conf*100:.0f}% | {status}",
+                                (x1 + 6, y1 - 8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
-                    ts = datetime.now().strftime("%H:%M:%S")
-                    self.person_detected.emit(name, conf, ts)
+                    self.person_detected.emit(
+                        name, conf, datetime.now().strftime("%H:%M:%S"))
+
                 self.frame_ready.emit(frame)
                 cv2.waitKey(1)
             cap.release()
@@ -498,23 +552,29 @@ class IndicatorPill(QFrame):
         lay.setSpacing(6)
 
         self.dot = QLabel("◆")
-        self.dot.setStyleSheet(f"color: {TEXT_DIM}; font-size: 7px; background: transparent; border: none;")
         self.txt = QLabel(label)
-        self.txt.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; font-family: '{MONO_FONT}'; background: transparent; border: none;")
-
         lay.addWidget(self.dot)
         lay.addWidget(self.txt)
         self.setActive(False)
 
     def setActive(self, active: bool):
         if active:
-            self.dot.setStyleSheet(f"color: {GREEN}; font-size: 7px; background: transparent; border: none;")
-            self.txt.setStyleSheet(f"color: {GREEN}; font-size: 11px; font-family: '{MONO_FONT}'; font-weight: 600; background: transparent; border: none;")
-            self.setStyleSheet(f"background: {GREEN_DIM}; border: 1px solid rgba(0,255,136,0.20); border-radius: 14px;")
+            self.dot.setStyleSheet(
+                f"color: {GREEN}; font-size: 7px; background: transparent; border: none;")
+            self.txt.setStyleSheet(
+                f"color: {GREEN}; font-size: 11px; font-family: '{MONO_FONT}';"
+                f" font-weight: 600; background: transparent; border: none;")
+            self.setStyleSheet(
+                f"background: {GREEN_DIM}; border: 1px solid rgba(0,255,136,0.20);"
+                f" border-radius: 14px;")
         else:
-            self.dot.setStyleSheet(f"color: {TEXT_DIM}; font-size: 7px; background: transparent; border: none;")
-            self.txt.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; font-family: '{MONO_FONT}'; background: transparent; border: none;")
-            self.setStyleSheet(f"background: {SURFACE}; border: 1px solid {BORDER2}; border-radius: 14px;")
+            self.dot.setStyleSheet(
+                f"color: {TEXT_DIM}; font-size: 7px; background: transparent; border: none;")
+            self.txt.setStyleSheet(
+                f"color: {TEXT_DIM}; font-size: 11px; font-family: '{MONO_FONT}';"
+                f" background: transparent; border: none;")
+            self.setStyleSheet(
+                f"background: {SURFACE}; border: 1px solid {BORDER2}; border-radius: 14px;")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -527,10 +587,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("AI Face Recognition Monitoring System")
         self.setMinimumSize(1300, 820)
         self.setStyleSheet(STYLESHEET)
-        self.live_threshold = THRESHOLD
+        self.live_threshold   = THRESHOLD
+        self.live_vote_frames = VOTE_FRAMES
 
-        self.enroll_worker: Optional[EnrollWorker] = None
-        self.train_worker:  Optional[TrainWorker]  = None
+        self.enroll_worker: Optional[EnrollWorker]      = None
+        self.train_worker:  Optional[TrainWorker]       = None
         self.recog_worker:  Optional[RecognitionWorker] = None
 
         self._build_ui()
@@ -542,23 +603,33 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
+
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self._build_header())
 
+        # ── Body wrapper ──────────────────────────────────────────────
         body = QFrame()
         body.setFrameShape(QFrame.NoFrame)
         body.setStyleSheet("background: transparent; border: none;")
-        body_lay = QGridLayout(body)
+
+        # QHBoxLayout replaces QGridLayout.
+        # Explicit fixed-width widgets on the sides prevent Qt from
+        # redistributing column space when video frames arrive.
+        body_lay = QHBoxLayout(body)
         body_lay.setContentsMargins(16, 16, 16, 16)
         body_lay.setSpacing(14)
 
-        # Left panel — workflow steps
+        # ── LEFT — fixed 380 px ───────────────────────────────────────
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.NoFrame)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Hard-pin the width so no content change can push the video panel.
+        left_scroll.setFixedWidth(380)
+        left_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
         left_w = QWidget()
         left_w.setStyleSheet("background: transparent;")
         left_lay = QVBoxLayout(left_w)
@@ -567,29 +638,32 @@ class MainWindow(QMainWindow):
         left_lay.addWidget(self._build_step1())
         left_lay.addWidget(self._build_step2())
         left_lay.addWidget(self._build_step3())
+        # addStretch inside scroll content only — keeps cards at top,
+        # has zero effect on the scroll area's own fixed width.
         left_lay.addStretch()
         left_scroll.setWidget(left_w)
 
-        # Center — video panel
+        # ── CENTER — flexible, absorbs all leftover space ─────────────
         center_w = self._build_video_panel()
+        center_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # Right panel
+        # ── RIGHT — fixed 320 px ──────────────────────────────────────
         right_w = QWidget()
         right_w.setStyleSheet("background: transparent;")
+        right_w.setFixedWidth(320)
+        right_w.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
         right_lay = QVBoxLayout(right_w)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(10)
-        right_lay.addWidget(self._build_users_panel(), 1)
-        right_lay.addWidget(self._build_status_panel())
+        right_lay.addWidget(self._build_users_panel(), 1)  # grows vertically
+        right_lay.addWidget(self._build_status_panel())    # fixed height
 
-        body_lay.addWidget(left_scroll, 0, 0)
-        body_lay.addWidget(center_w,   0, 1)
-        body_lay.addWidget(right_w,    0, 2)
-        body_lay.setColumnStretch(0, 0)
-        body_lay.setColumnStretch(1, 1)
-        body_lay.setColumnStretch(2, 0)
-        body_lay.setColumnMinimumWidth(0, 360)
-        body_lay.setColumnMinimumWidth(2, 300)
+        # stretch=0 (default) for left/right → they never grow.
+        # stretch=1 for center              → takes all remaining space.
+        body_lay.addWidget(left_scroll)          # stretch=0
+        body_lay.addWidget(center_w, stretch=1)  # stretch=1
+        body_lay.addWidget(right_w)              # stretch=0
 
         root.addWidget(body, 1)
 
@@ -605,7 +679,6 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(20, 0, 20, 0)
         lay.setSpacing(0)
 
-        # Logo area
         logo_frame = QFrame()
         logo_frame.setFrameShape(QFrame.NoFrame)
         logo_frame.setStyleSheet("background: transparent; border: none;")
@@ -614,11 +687,16 @@ class MainWindow(QMainWindow):
         logo_lay.setSpacing(10)
 
         bracket_l = QLabel("[")
-        bracket_l.setStyleSheet(f"color: {CYAN}; font-size: 22px; font-weight: 900; font-family: '{MONO_FONT}'; background: transparent; border: none;")
+        bracket_l.setStyleSheet(
+            f"color: {CYAN}; font-size: 22px; font-weight: 900;"
+            f" font-family: '{MONO_FONT}'; background: transparent; border: none;")
         icon_lbl = QLabel("◈")
-        icon_lbl.setStyleSheet(f"color: {CYAN}; font-size: 18px; background: transparent; border: none;")
+        icon_lbl.setStyleSheet(
+            f"color: {CYAN}; font-size: 18px; background: transparent; border: none;")
         bracket_r = QLabel("]")
-        bracket_r.setStyleSheet(f"color: {CYAN}; font-size: 22px; font-weight: 900; font-family: '{MONO_FONT}'; background: transparent; border: none;")
+        bracket_r.setStyleSheet(
+            f"color: {CYAN}; font-size: 22px; font-weight: 900;"
+            f" font-family: '{MONO_FONT}'; background: transparent; border: none;")
 
         title_frame = QFrame()
         title_frame.setFrameShape(QFrame.NoFrame)
@@ -628,9 +706,14 @@ class MainWindow(QMainWindow):
         title_vlay.setSpacing(1)
 
         t1 = QLabel("AI FACE RECOGNITION")
-        t1.setStyleSheet(f"color: {TEXT}; font-size: 14px; font-weight: 700; font-family: '{MONO_FONT}'; letter-spacing: 2px; background: transparent; border: none;")
+        t1.setStyleSheet(
+            f"color: {TEXT}; font-size: 14px; font-weight: 700;"
+            f" font-family: '{MONO_FONT}'; letter-spacing: 2px;"
+            f" background: transparent; border: none;")
         t2 = QLabel("MONITORING SYSTEM  v2.0")
-        t2.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; font-family: '{MONO_FONT}'; letter-spacing: 1px; background: transparent; border: none;")
+        t2.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 10px; font-family: '{MONO_FONT}';"
+            f" letter-spacing: 1px; background: transparent; border: none;")
         title_vlay.addWidget(t1)
         title_vlay.addWidget(t2)
 
@@ -643,9 +726,10 @@ class MainWindow(QMainWindow):
         lay.addWidget(logo_frame)
         lay.addStretch()
 
-        # Live clock
         self.clock_lbl = QLabel()
-        self.clock_lbl.setStyleSheet(f"color: {CYAN}; font-size: 12px; font-family: '{MONO_FONT}'; background: transparent; border: none;")
+        self.clock_lbl.setStyleSheet(
+            f"color: {CYAN}; font-size: 12px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
         self._update_clock()
         clock_timer = QTimer(self)
         clock_timer.timeout.connect(self._update_clock)
@@ -653,13 +737,12 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.clock_lbl)
         lay.addSpacing(24)
 
-        # Indicator pills
         self.ind_model      = IndicatorPill("MODEL")
         self.ind_camera     = IndicatorPill("CAMERA")
         self.ind_embeddings = IndicatorPill("EMBEDDINGS")
         self.ind_system     = IndicatorPill("SYSTEM")
-
-        for pill in [self.ind_model, self.ind_camera, self.ind_embeddings, self.ind_system]:
+        for pill in [self.ind_model, self.ind_camera,
+                     self.ind_embeddings, self.ind_system]:
             lay.addWidget(pill)
             lay.addSpacing(6)
 
@@ -671,15 +754,10 @@ class MainWindow(QMainWindow):
     def _set_indicator(self, widget: IndicatorPill, active: bool):
         widget.setActive(active)
 
-    # ── Step Card — borderless, clean background ──────────────────────
+    # ── Step Card ─────────────────────────────────────────────────────
 
-    def _step_card(self, num: str, title: str, subtitle: str = "") -> tuple[QFrame, QVBoxLayout]:
-        """
-        Creates a clean step card.
-        - No left-border accent line
-        - Subtle background only
-        - Step number badge inline with title
-        """
+    def _step_card(self, num: str, title: str,
+                   subtitle: str = "") -> tuple[QFrame, QVBoxLayout]:
         card = QFrame()
         card.setFrameShape(QFrame.NoFrame)
         card.setStyleSheet(f"""
@@ -695,23 +773,15 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(18, 16, 18, 18)
         v.setSpacing(12)
 
-        # Step header row: badge + title text
         hdr = QHBoxLayout()
         hdr.setSpacing(10)
         hdr.setContentsMargins(0, 0, 0, 0)
 
-        # Step number — shown as tiny STEP 01 / 02 / 03 label
         step_tag = QLabel(f"STEP {num}")
         step_tag.setStyleSheet(f"""
-            color: {CYAN};
-            background: {CYAN_DIM};
-            border: none;
-            border-radius: 3px;
-            font-size: 9px;
-            font-weight: 700;
-            font-family: '{MONO_FONT}';
-            letter-spacing: 1px;
-            padding: 3px 7px;
+            color: {CYAN}; background: {CYAN_DIM}; border: none;
+            border-radius: 3px; font-size: 9px; font-weight: 700;
+            font-family: '{MONO_FONT}'; letter-spacing: 1px; padding: 3px 7px;
         """)
         step_tag.setFixedHeight(20)
 
@@ -722,24 +792,20 @@ class MainWindow(QMainWindow):
         title_lbl = QLabel(title)
         title_lbl.setStyleSheet(
             f"color: {TEXT}; font-size: 14px; font-weight: 700;"
-            f" font-family: '{SANS_FONT}'; background: transparent; border: none;"
-        )
+            f" font-family: '{SANS_FONT}'; background: transparent; border: none;")
         title_block.addWidget(title_lbl)
 
         if subtitle:
             sub_lbl = QLabel(subtitle)
             sub_lbl.setStyleSheet(
                 f"color: {TEXT_DIM}; font-size: 10px;"
-                f" font-family: '{SANS_FONT}'; background: transparent; border: none;"
-            )
+                f" font-family: '{SANS_FONT}'; background: transparent; border: none;")
             title_block.addWidget(sub_lbl)
 
         hdr.addWidget(step_tag)
         hdr.addLayout(title_block)
         hdr.addStretch()
         v.addLayout(hdr)
-
-        # Thin separator under header
         v.addWidget(_divider())
 
         return card, v
@@ -749,19 +815,15 @@ class MainWindow(QMainWindow):
     def _build_step1(self) -> QFrame:
         card, v = self._step_card(
             "01", "Enroll New Identity",
-            "Capture face samples for a person"
-        )
+            "Capture face samples for a person")
 
-        # Subject Name
         name_hdr = QHBoxLayout()
         name_hdr.setSpacing(6)
-        name_lbl = _field_label("SUBJECT NAME")
         req_badge = QLabel("● REQUIRED")
         req_badge.setStyleSheet(
             f"color: {CYAN}; font-size: 9px; font-family: '{MONO_FONT}';"
-            f" font-weight: 700; letter-spacing: 1px; background: transparent; border: none;"
-        )
-        name_hdr.addWidget(name_lbl)
+            f" font-weight: 700; letter-spacing: 1px; background: transparent; border: none;")
+        name_hdr.addWidget(_field_label("SUBJECT NAME"))
         name_hdr.addStretch()
         name_hdr.addWidget(req_badge)
         v.addLayout(name_hdr)
@@ -771,30 +833,20 @@ class MainWindow(QMainWindow):
         self.name_input.setToolTip("Enter the full name of the person to enroll")
         self.name_input.setStyleSheet(f"""
             QLineEdit {{
-                background: {SURFACE2};
-                border: 1.5px solid {CYAN};
-                border-radius: 6px;
-                padding: 9px 14px;
-                color: {TEXT};
-                font-size: 13px;
-                font-family: '{SANS_FONT}';
+                background: {SURFACE2}; border: 1.5px solid {CYAN};
+                border-radius: 6px; padding: 9px 14px;
+                color: {TEXT}; font-size: 13px; font-family: '{SANS_FONT}';
             }}
-            QLineEdit:focus {{
-                border: 1.5px solid {CYAN};
-                background: {SURFACE2};
-            }}
-            QLineEdit::placeholder {{
-                color: {TEXT_DIM};
-                font-style: italic;
-            }}
+            QLineEdit:focus {{ border: 1.5px solid {CYAN}; background: {SURFACE2}; }}
+            QLineEdit::placeholder {{ color: {TEXT_DIM}; font-style: italic; }}
         """)
         v.addWidget(self.name_input)
 
-        name_hint = QLabel("Enter name above, then click  CAPTURE FACE  to begin enrollment")
+        name_hint = QLabel(
+            "Enter name above, then click  CAPTURE FACE  to begin enrollment")
         name_hint.setStyleSheet(
             f"color: {TEXT_DIM}; font-size: 10px; font-family: '{SANS_FONT}';"
-            f" background: transparent; border: none;"
-        )
+            f" background: transparent; border: none;")
         name_hint.setWordWrap(True)
         v.addWidget(name_hint)
 
@@ -802,19 +854,29 @@ class MainWindow(QMainWindow):
         row.addWidget(_field_label("SAMPLE COUNT"))
         row.addStretch()
         self.img_spin = QSpinBox()
-        self.img_spin.setRange(2, 20)
-        self.img_spin.setValue(5)
+        self.img_spin.setRange(2, 30)
+        self.img_spin.setValue(10)
+        self.img_spin.setToolTip(
+            "8–12 images per person recommended\n"
+            "(angles: straight, left, right + near, medium, far)")
         self.img_spin.setFixedWidth(70)
         row.addWidget(self.img_spin)
         v.addLayout(row)
 
-        # Thumbnail strip — borderless container
+        hint_lbl = QLabel(
+            "Tip: 8–12 images  ·  vary angles (left, straight, right)"
+            "  ·  step back for far shots")
+        hint_lbl.setStyleSheet(
+            f"color: {AMBER}; font-size: 9px; font-family: '{SANS_FONT}';"
+            f" background: transparent; border: none;")
+        hint_lbl.setWordWrap(True)
+        v.addWidget(hint_lbl)
+
         thumb_container = QFrame()
         thumb_container.setFrameShape(QFrame.NoFrame)
         thumb_container.setFixedHeight(44)
         thumb_container.setStyleSheet(
-            f"background: {SURFACE}; border: none; border-radius: 4px;"
-        )
+            f"background: {SURFACE}; border: none; border-radius: 4px;")
         self.thumb_layout = QHBoxLayout(thumb_container)
         self.thumb_layout.setContentsMargins(6, 4, 6, 4)
         self.thumb_layout.setSpacing(4)
@@ -822,8 +884,8 @@ class MainWindow(QMainWindow):
         v.addWidget(thumb_container)
 
         self.btn_enroll = _btn("◉  CAPTURE FACE", CYAN)
-        v.addWidget(self.btn_enroll)
         self.btn_enroll.clicked.connect(self._on_enroll)
+        v.addWidget(self.btn_enroll)
 
         return card
 
@@ -832,8 +894,7 @@ class MainWindow(QMainWindow):
     def _build_step2(self) -> QFrame:
         card, v = self._step_card(
             "02", "Build Recognition Engine",
-            "Generate face embeddings from enrolled data"
-        )
+            "Generate face embeddings from enrolled data")
 
         prog_row = QHBoxLayout()
         self.train_pct_lbl = _mono_label("0%", 11, CYAN)
@@ -848,13 +909,12 @@ class MainWindow(QMainWindow):
         self.train_progress.setFixedHeight(6)
         v.addWidget(self.train_progress)
 
-        # Status line — no box, plain monospace label
         self.train_status_lbl = _mono_label("IDLE  —  awaiting command", 11, TEXT_DIM)
         v.addWidget(self.train_status_lbl)
 
         self.btn_train = _btn("⬡  BUILD EMBEDDINGS", CYAN)
-        v.addWidget(self.btn_train)
         self.btn_train.clicked.connect(self._on_train)
+        v.addWidget(self.btn_train)
 
         return card
 
@@ -863,8 +923,7 @@ class MainWindow(QMainWindow):
     def _build_step3(self) -> QFrame:
         card, v = self._step_card(
             "03", "Launch Live Monitoring",
-            "Real-time face recognition on webcam stream"
-        )
+            "Real-time face recognition on webcam stream")
 
         thr_row = QHBoxLayout()
         thr_row.addWidget(_field_label("CONFIDENCE THRESHOLD"))
@@ -887,6 +946,29 @@ class MainWindow(QMainWindow):
         range_row.addWidget(_mono_label("0.90 · HIGH", 9, TEXT_DIM))
         v.addLayout(range_row)
 
+        vote_row = QHBoxLayout()
+        vote_row.addWidget(_field_label("VOTE FRAMES"))
+        vote_row.addStretch()
+        self.vote_spin = QSpinBox()
+        self.vote_spin.setRange(1, 10)
+        self.vote_spin.setValue(VOTE_FRAMES)
+        self.vote_spin.setFixedWidth(70)
+        self.vote_spin.setToolTip(
+            "Majority-vote window: how many consecutive frames\n"
+            "must agree before showing the recognition result.\n"
+            "Increase to 5–7 for stability; reduce to 1–2 for instant response.")
+        self.vote_spin.valueChanged.connect(self._on_vote_spin_changed)
+        vote_row.addWidget(self.vote_spin)
+        v.addLayout(vote_row)
+
+        vote_hint = QLabel(
+            "Higher = more stable · Lower = faster response (3–5 recommended)")
+        vote_hint.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 9px; font-family: '{SANS_FONT}';"
+            f" background: transparent; border: none;")
+        vote_hint.setWordWrap(True)
+        v.addWidget(vote_hint)
+
         self.btn_monitor = _btn("▶  START RECOGNITION", GREEN)
         self.btn_monitor.clicked.connect(self._on_monitor)
         v.addWidget(self.btn_monitor)
@@ -898,7 +980,7 @@ class MainWindow(QMainWindow):
 
         return card
 
-    # ── Video Panel — border kept intentionally ───────────────────────
+    # ── Video Panel ───────────────────────────────────────────────────
 
     def _build_video_panel(self) -> QFrame:
         card = QFrame()
@@ -916,32 +998,40 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(12, 12, 12, 12)
         v.setSpacing(8)
 
-        # Top title bar of video panel
+        # Title bar
         bar = QFrame()
         bar.setFrameShape(QFrame.NoFrame)
         bar.setFixedHeight(28)
-        bar.setStyleSheet(f"background: {SURFACE}; border: none; border-radius: 3px;")
+        bar.setStyleSheet(
+            f"background: {SURFACE}; border: none; border-radius: 3px;")
         bar_lay = QHBoxLayout(bar)
         bar_lay.setContentsMargins(10, 0, 10, 0)
         bar_lay.setSpacing(8)
-
         for col in [GREEN, AMBER, RED]:
             dot = QLabel("●")
-            dot.setStyleSheet(f"color: {col}; font-size: 9px; background: transparent; border: none;")
+            dot.setStyleSheet(
+                f"color: {col}; font-size: 9px; background: transparent; border: none;")
             bar_lay.addWidget(dot)
-
         bar_lay.addSpacing(12)
-        cam_tag = _mono_label("FEED  /  CAM_0", 10, TEXT_DIM)
-        bar_lay.addWidget(cam_tag)
+        bar_lay.addWidget(_mono_label("FEED  /  CAM_0", 10, TEXT_DIM))
         bar_lay.addStretch()
         self.feed_status_lbl = _mono_label("● OFFLINE", 10, TEXT_DIM)
         bar_lay.addWidget(self.feed_status_lbl)
         v.addWidget(bar)
 
-        # Video label
+        # ── Video label ───────────────────────────────────────────────
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setMinimumSize(480, 380)
+
+        # QSizePolicy.Ignored → sizeHint reports (0,0) to the layout engine.
+        # Video frames paint inside the already-allocated space; they can
+        # NEVER force the card or the flanking panels to shift position.
+        # The label still visually fills all available space via stretch=1.
+        self.video_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+
+        # Minimum floor prevents collapse when no frame is displayed.
+        self.video_label.setMinimumSize(320, 260)
+
         self.video_label.setStyleSheet(f"""
             background: {BG};
             border: 1px solid {BORDER2};
@@ -950,18 +1040,24 @@ class MainWindow(QMainWindow):
             font-family: '{MONO_FONT}';
             font-size: 13px;
         """)
-        self.video_label.setText("▷  CAMERA FEED  ◁\n\nInitialize a workflow step to begin stream")
+        self.video_label.setText(
+            "▷  CAMERA FEED  ◁\n\nInitialize a workflow step to begin stream")
 
-        # Scanline overlay
+        # Scanline overlay — geometry synced in resizeEvent
         self._scanline = ScanLineWidget(self.video_label)
         self._scanline.setGeometry(self.video_label.rect())
 
-        v.addWidget(self.video_label)
+        # stretch=1 gives the label all remaining vertical space without
+        # propagating its own preferred size back to the layout.
+        v.addWidget(self.video_label, stretch=1)
+
         return card
+
+    # ── resizeEvent — keep scanline overlay in sync ───────────────────
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if hasattr(self, '_scanline') and hasattr(self, 'video_label'):
+        if hasattr(self, "_scanline") and hasattr(self, "video_label"):
             self._scanline.setGeometry(self.video_label.rect())
 
     # ── Enrolled Identities Panel ─────────────────────────────────────
@@ -988,14 +1084,12 @@ class MainWindow(QMainWindow):
         refresh_btn = QPushButton("⟳")
         refresh_btn.setStyleSheet(
             f"background: transparent; color: {TEXT_DIM}; font-size: 16px;"
-            f" border: none; padding: 0;"
-        )
+            f" border: none; padding: 0;")
         refresh_btn.setFixedSize(22, 22)
         refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.clicked.connect(self._refresh_users)
         hdr.addWidget(refresh_btn)
         v.addLayout(hdr)
-
         v.addWidget(_divider())
 
         scroll = QScrollArea()
@@ -1028,46 +1122,42 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 12, 14, 12)
         v.setSpacing(8)
-
         v.addWidget(_section_title("LATEST DETECTION"))
         v.addWidget(_divider())
 
         self.auth_label = QLabel("—  AWAITING STREAM")
         self.auth_label.setAlignment(Qt.AlignCenter)
         self.auth_label.setStyleSheet(f"""
-            color: {TEXT_DIM};
-            font-size: 12px;
-            font-family: '{MONO_FONT}';
-            font-weight: 700;
-            background: transparent;
-            border: none;
-            padding: 6px 0;
-            letter-spacing: 1px;
+            color: {TEXT_DIM}; font-size: 12px; font-family: '{MONO_FONT}';
+            font-weight: 700; background: transparent; border: none;
+            padding: 6px 0; letter-spacing: 1px;
         """)
         v.addWidget(self.auth_label)
         return card
 
     # ══════════════════════════════════════════════════════════════════
-    #  Slots — all signals/slots preserved
+    #  Slots  (logic completely unchanged)
     # ══════════════════════════════════════════════════════════════════
 
     @pyqtSlot()
     def _on_enroll(self):
         name = self.name_input.text().strip()
         if not name:
-            QMessageBox.warning(self, "Validation Error", "Please enter a subject name.")
+            QMessageBox.warning(self, "Validation Error",
+                                "Please enter a subject name.")
             return
         cnt = self.img_spin.value()
         while self.thumb_layout.count() > 1:
             item = self.thumb_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
+            if item.widget():
+                item.widget().deleteLater()
 
         self.btn_enroll.setEnabled(False)
         self.btn_enroll.setText("● CAPTURING...")
         self.feed_status_lbl.setText("● ENROLL")
         self.feed_status_lbl.setStyleSheet(
-            f"color: {CYAN}; font-size: 10px; font-family: '{MONO_FONT}'; background: transparent; border: none;"
-        )
+            f"color: {CYAN}; font-size: 10px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
 
         self.enroll_worker = EnrollWorker(name, cnt)
         self.enroll_worker.frame_ready.connect(self._display_frame)
@@ -1079,7 +1169,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(np.ndarray, int)
     def _on_face_captured(self, face_rgb: np.ndarray, count: int):
         face_resized = cv2.resize(face_rgb, (32, 32))
-        qi = QImage(face_resized.data, 32, 32, 3 * 32, QImage.Format_RGB888)
+        qi  = QImage(face_resized.data, 32, 32, 3 * 32, QImage.Format_RGB888)
         lbl = QLabel()
         lbl.setFixedSize(32, 32)
         lbl.setStyleSheet(f"border: 1px solid {CYAN}; border-radius: 2px;")
@@ -1093,14 +1183,13 @@ class MainWindow(QMainWindow):
         self.name_input.clear()
         self.feed_status_lbl.setText("● OFFLINE")
         self.feed_status_lbl.setStyleSheet(
-            f"color: {TEXT_DIM}; font-size: 10px; font-family: '{MONO_FONT}'; background: transparent; border: none;"
-        )
+            f"color: {TEXT_DIM}; font-size: 10px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
         QMessageBox.information(self, "Enrollment Complete",
                                 f"Successfully enrolled {captured} face samples.")
         self._refresh_users()
         self.video_label.setText(
-            "▷  CAMERA FEED  ◁\n\nInitialize a workflow step to begin stream"
-        )
+            "▷  CAMERA FEED  ◁\n\nInitialize a workflow step to begin stream")
 
     @pyqtSlot()
     def _on_train(self):
@@ -1127,8 +1216,8 @@ class MainWindow(QMainWindow):
         self.btn_train.setText("⬡  BUILD EMBEDDINGS")
         self.train_status_lbl.setText(f"✓  {msg.upper()}")
         self.train_status_lbl.setStyleSheet(
-            f"color: {GREEN}; font-size: 11px; font-family: '{MONO_FONT}'; background: transparent; border: none;"
-        )
+            f"color: {GREEN}; font-size: 11px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
         self._set_indicator(self.ind_embeddings, True)
         self._refresh_users()
         QMessageBox.information(self, "Training Complete", msg)
@@ -1145,11 +1234,12 @@ class MainWindow(QMainWindow):
         self.btn_train.setEnabled(False)
         self.feed_status_lbl.setText("● LIVE")
         self.feed_status_lbl.setStyleSheet(
-            f"color: {GREEN}; font-size: 10px; font-family: '{MONO_FONT}'; background: transparent; border: none;"
-        )
+            f"color: {GREEN}; font-size: 10px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
 
         self.recog_worker = RecognitionWorker()
-        self.recog_worker.live_threshold = self.live_threshold
+        self.recog_worker.live_threshold   = self.live_threshold
+        self.recog_worker.live_vote_frames = self.live_vote_frames
         self.recog_worker.frame_ready.connect(self._display_frame)
         self.recog_worker.person_detected.connect(self._on_person_detected)
         self.recog_worker.error.connect(self._on_worker_error)
@@ -1169,28 +1259,30 @@ class MainWindow(QMainWindow):
         self.video_label.setText("▷  CAMERA FEED  ◁\n\nMonitoring stopped")
         self.feed_status_lbl.setText("● OFFLINE")
         self.feed_status_lbl.setStyleSheet(
-            f"color: {TEXT_DIM}; font-size: 10px; font-family: '{MONO_FONT}'; background: transparent; border: none;"
-        )
+            f"color: {TEXT_DIM}; font-size: 10px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
         self.auth_label.setText("—  STREAM TERMINATED")
         self.auth_label.setStyleSheet(
-            f"color: {TEXT_DIM}; font-size: 12px; font-family: '{MONO_FONT}'; font-weight: 700;"
-            f" background: transparent; border: none; padding: 6px 0; letter-spacing: 1px;"
-        )
+            f"color: {TEXT_DIM}; font-size: 12px; font-family: '{MONO_FONT}';"
+            f" font-weight: 700; background: transparent; border: none;"
+            f" padding: 6px 0; letter-spacing: 1px;")
 
     @pyqtSlot(str, float, str)
     def _on_person_detected(self, name: str, conf: float, ts: str):
         if name != "Unknown":
-            self.auth_label.setText(f"✓  AUTHORIZED  —  {name}  [{conf*100:.0f}%]")
+            self.auth_label.setText(
+                f"✓  AUTHORIZED  —  {name}  [{conf*100:.0f}%]")
             self.auth_label.setStyleSheet(
-                f"color: {GREEN}; font-size: 12px; font-family: '{MONO_FONT}'; font-weight: 700;"
-                f" background: transparent; border: none; padding: 6px 0; letter-spacing: 1px;"
-            )
+                f"color: {GREEN}; font-size: 12px; font-family: '{MONO_FONT}';"
+                f" font-weight: 700; background: transparent; border: none;"
+                f" padding: 6px 0; letter-spacing: 1px;")
         else:
-            self.auth_label.setText(f"✗  UNKNOWN SUBJECT  —  {conf*100:.0f}%  MATCH")
+            self.auth_label.setText(
+                f"✗  UNKNOWN SUBJECT  —  {conf*100:.0f}%  MATCH")
             self.auth_label.setStyleSheet(
-                f"color: {RED}; font-size: 12px; font-family: '{MONO_FONT}'; font-weight: 700;"
-                f" background: transparent; border: none; padding: 6px 0; letter-spacing: 1px;"
-            )
+                f"color: {RED}; font-size: 12px; font-family: '{MONO_FONT}';"
+                f" font-weight: 700; background: transparent; border: none;"
+                f" padding: 6px 0; letter-spacing: 1px;")
 
     @pyqtSlot(int)
     def _on_slider_changed(self, value: int):
@@ -1198,6 +1290,12 @@ class MainWindow(QMainWindow):
         self.slider_val_lbl.setText(f"{self.live_threshold:.2f}")
         if self.recog_worker:
             self.recog_worker.live_threshold = self.live_threshold
+
+    @pyqtSlot(int)
+    def _on_vote_spin_changed(self, value: int):
+        self.live_vote_frames = value
+        if self.recog_worker:
+            self.recog_worker.live_vote_frames = value
 
     def _on_worker_error(self, msg: str):
         QMessageBox.critical(self, "System Error", msg)
@@ -1216,7 +1314,11 @@ class MainWindow(QMainWindow):
         h, w, ch = rgb.shape
         qi = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
         pm = QPixmap.fromImage(qi)
-        scaled = pm.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # Scale to current label size. Because the label uses
+        # QSizePolicy.Ignored, this scaled size is never fed back into
+        # the layout as a new size hint — no shifting, ever.
+        scaled = pm.scaled(
+            self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.video_label.setPixmap(scaled)
 
     # ── Refresh ───────────────────────────────────────────────────────
@@ -1224,17 +1326,21 @@ class MainWindow(QMainWindow):
     def _refresh_status(self):
         self._set_indicator(self.ind_model, True)
         cap = (cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
-               if sys.platform.startswith("win") else cv2.VideoCapture(CAMERA_INDEX))
+               if sys.platform.startswith("win")
+               else cv2.VideoCapture(CAMERA_INDEX))
         cam_ok = cap.isOpened()
         cap.release()
         self._set_indicator(self.ind_camera, cam_ok)
-        self._set_indicator(self.ind_embeddings, Path(EMBEDDINGS_DIR, "prototypes.npy").exists())
+        self._set_indicator(
+            self.ind_embeddings,
+            Path(EMBEDDINGS_DIR, "prototypes.npy").exists())
         self._set_indicator(self.ind_system, True)
 
     def _refresh_users(self):
         while self.users_layout.count():
             item = self.users_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
+            if item.widget():
+                item.widget().deleteLater()
 
         folders = get_identity_folders(DATASET_DIR)
         emb_ok  = Path(EMBEDDINGS_DIR, "prototypes.npy").exists()
@@ -1242,8 +1348,8 @@ class MainWindow(QMainWindow):
         if not folders:
             ph = QLabel("NO IDENTITIES ENROLLED")
             ph.setStyleSheet(
-                f"color: {TEXT_DIM}; font-size: 11px; font-family: '{MONO_FONT}'; padding: 16px; border: none;"
-            )
+                f"color: {TEXT_DIM}; font-size: 11px; font-family: '{MONO_FONT}';"
+                f" padding: 16px; border: none;")
             ph.setAlignment(Qt.AlignCenter)
             self.users_layout.addWidget(ph)
         else:
@@ -1252,12 +1358,12 @@ class MainWindow(QMainWindow):
                         list(folder.glob("*.png")) +
                         list(folder.glob("*.jpeg")))
                 self.users_layout.addWidget(
-                    self._user_card(folder.name, len(imgs), imgs, emb_ok)
-                )
+                    self._user_card(folder.name, len(imgs), imgs, emb_ok))
 
         self.users_layout.addStretch()
 
-    def _user_card(self, name: str, count: int, imgs: list, trained: bool) -> QFrame:
+    def _user_card(self, name: str, count: int,
+                   imgs: list, trained: bool) -> QFrame:
         card = QFrame()
         card.setFrameShape(QFrame.NoFrame)
         card.setStyleSheet(f"""
@@ -1266,42 +1372,37 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-radius: 4px;
             }}
-            QFrame:hover {{
-                background: {SURFACE2};
-            }}
+            QFrame:hover {{ background: {SURFACE2}; }}
         """)
         h = QHBoxLayout(card)
         h.setContentsMargins(10, 8, 10, 8)
         h.setSpacing(10)
 
-        # Avatar
         av = QLabel()
         av.setFixedSize(36, 36)
         av.setAlignment(Qt.AlignCenter)
-
         if imgs:
             img = cv2.imread(str(imgs[0]))
             if img is not None:
                 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img_rgb = cv2.resize(img_rgb, (36, 36))
                 qi = QImage(img_rgb.data, 36, 36, 3 * 36, QImage.Format_RGB888)
-                av.setPixmap(
-                    QPixmap.fromImage(qi).scaled(36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
-                av.setStyleSheet(f"border: 1px solid {CYAN}; border-radius: 2px;")
+                av.setPixmap(QPixmap.fromImage(qi).scaled(
+                    36, 36, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                av.setStyleSheet(
+                    f"border: 1px solid {CYAN}; border-radius: 2px;")
             else:
                 av.setText(name[0].upper())
                 av.setStyleSheet(
-                    f"background: {CYAN_DIM}; color: {CYAN}; font-size: 15px; font-weight: 700;"
-                    f" font-family: '{MONO_FONT}'; border: 1px solid {CYAN}; border-radius: 2px;"
-                )
+                    f"background: {CYAN_DIM}; color: {CYAN}; font-size: 15px;"
+                    f" font-weight: 700; font-family: '{MONO_FONT}';"
+                    f" border: 1px solid {CYAN}; border-radius: 2px;")
         else:
             av.setText(name[0].upper())
             av.setStyleSheet(
-                f"background: {CYAN_DIM}; color: {CYAN}; font-size: 15px; font-weight: 700;"
-                f" font-family: '{MONO_FONT}'; border: 1px solid {CYAN}; border-radius: 2px;"
-            )
-
+                f"background: {CYAN_DIM}; color: {CYAN}; font-size: 15px;"
+                f" font-weight: 700; font-family: '{MONO_FONT}';"
+                f" border: 1px solid {CYAN}; border-radius: 2px;")
         h.addWidget(av)
 
         info = QVBoxLayout()
@@ -1309,13 +1410,11 @@ class MainWindow(QMainWindow):
         n_lbl = QLabel(name)
         n_lbl.setStyleSheet(
             f"font-size: 12px; font-weight: 700; color: {TEXT};"
-            f" font-family: '{SANS_FONT}'; background: transparent; border: none;"
-        )
+            f" font-family: '{SANS_FONT}'; background: transparent; border: none;")
         c_lbl = QLabel(f"{count} samples")
         c_lbl.setStyleSheet(
             f"font-size: 10px; color: {TEXT_DIM}; font-family: '{MONO_FONT}';"
-            f" background: transparent; border: none;"
-        )
+            f" background: transparent; border: none;")
         info.addWidget(n_lbl)
         info.addWidget(c_lbl)
         h.addLayout(info)
@@ -1323,14 +1422,15 @@ class MainWindow(QMainWindow):
 
         badge = QLabel("READY" if trained else "UNTRAINED")
         badge.setStyleSheet(
-            (f"color: {GREEN}; background: {GREEN_DIM}; border: 1px solid rgba(0,255,136,0.2);"
-             f" border-radius: 3px; font-size: 9px; font-weight: 700; font-family: '{MONO_FONT}';"
+            (f"color: {GREEN}; background: {GREEN_DIM};"
+             f" border: 1px solid rgba(0,255,136,0.2); border-radius: 3px;"
+             f" font-size: 9px; font-weight: 700; font-family: '{MONO_FONT}';"
              f" padding: 3px 8px; letter-spacing: 1px;")
             if trained else
-            (f"color: {AMBER}; background: {AMBER_DIM}; border: 1px solid rgba(255,170,0,0.2);"
-             f" border-radius: 3px; font-size: 9px; font-weight: 700; font-family: '{MONO_FONT}';"
-             f" padding: 3px 8px; letter-spacing: 1px;")
-        )
+            (f"color: {AMBER}; background: {AMBER_DIM};"
+             f" border: 1px solid rgba(255,170,0,0.2); border-radius: 3px;"
+             f" font-size: 9px; font-weight: 700; font-family: '{MONO_FONT}';"
+             f" padding: 3px 8px; letter-spacing: 1px;"))
         h.addWidget(badge)
         return card
 
@@ -1355,7 +1455,6 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # Dark palette base
     palette = QPalette()
     palette.setColor(QPalette.Window,          QColor(8,  12,  20))
     palette.setColor(QPalette.WindowText,      QColor(208, 228, 247))

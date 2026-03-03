@@ -59,7 +59,7 @@ class EmbeddingRequest(BaseModel):
         Validates backend/model options before invoking `generate_embeddings.py`.
     """
 
-    backend: str = Field("auto", pattern="^(auto|facenet|onnx)$")
+    backend: str = Field("auto", pattern="^(auto|facenet|onnx|insightface)$")
     onnx_model_path: str = Field("models/arcface.onnx")
 
 
@@ -74,7 +74,7 @@ class RecognitionRequest(BaseModel):
 
     metric: str = Field("cosine", pattern="^(cosine|euclidean)$")
     threshold: float = Field(0.60, description="Similarity threshold")
-    backend: str = Field("auto", pattern="^(auto|facenet|onnx)$")
+    backend: str = Field("auto", pattern="^(auto|facenet|onnx|insightface)$")
     onnx_model_path: str = Field("models/arcface.onnx")
     camera_id: int = Field(0, ge=0)
 

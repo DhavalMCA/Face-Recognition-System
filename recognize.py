@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import argparse
 import time
+from collections import Counter, deque
 from pathlib import Path
+from typing import Deque, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -32,6 +34,134 @@ from utils import (
     load_face_detector,
     load_saved_embeddings,
 )
+
+
+# ───────────────────────────────────────────────────────────────────────
+# FrameVoter — Majority-vote decision stability
+# ───────────────────────────────────────────────────────────────────────
+
+class FrameVoter:
+    """Per-face rolling majority-vote decision stabiliser.
+
+    Accumulates the last `window` per-frame identity predictions for each
+    tracked face and returns the label that appeared most often.  This
+    eliminates single-frame noise (blink, sudden head turn) that would
+    otherwise flicker the recognition result on screen.
+
+    Example (window=5)::
+
+        frames  [Alice, Alice, Unknown, Alice, Alice]
+        vote    → Alice  (4 of 5 votes)   ✔
+
+    Only a result that holds the majority is returned; if no label wins
+    more than half the votes the output is "Unknown".
+    """
+
+    def __init__(
+        self,
+        window: int = 5,
+        max_match_dist: int = 120,
+        max_missed_frames: int = 12,
+    ) -> None:
+        """Initialise voter.
+
+        Parameters:
+            window (int): Number of recent frames to consider (3 – 7 works well).
+            max_match_dist (int): Pixel radius for re-associating tracks.
+            max_missed_frames (int): Frames a track can be absent before reset.
+        """
+        if window < 1:
+            raise ValueError("window must be ≥ 1")
+        self.window = window
+        self.max_match_dist = max_match_dist
+        self.max_missed_frames = max_missed_frames
+        # {track_id: deque of (name, confidence) tuples}
+        self._history: Dict[int, Deque[Tuple[str, float]]] = {}
+        self._centers: Dict[int, Tuple[int, int]] = {}
+        self._missed:  Dict[int, int] = {}
+        self._next_id: int = 0
+
+    # ── internal helpers ────────────────────────────────────
+
+    @staticmethod
+    def _center(box: Tuple[int, int, int, int]) -> Tuple[int, int]:
+        x1, y1, x2, y2 = box
+        return (x1 + x2) // 2, (y1 + y2) // 2
+
+    def _match(self, center: Tuple[int, int]) -> Optional[int]:
+        best_id, best_dist = None, float(self.max_match_dist)
+        for tid, c in self._centers.items():
+            d = ((c[0] - center[0]) ** 2 + (c[1] - center[1]) ** 2) ** 0.5
+            if d < best_dist:
+                best_dist, best_id = d, tid
+        return best_id
+
+    # ── public API ────────────────────────────────────────
+
+    def vote(
+        self,
+        box: Tuple[int, int, int, int],
+        name: str,
+        confidence: float,
+    ) -> Tuple[str, float]:
+        """Record a single-frame prediction and return the majority-vote result.
+
+        Parameters:
+            box (Tuple): Bounding box (x1, y1, x2, y2) of the detected face.
+            name (str): Single-frame identity prediction (may be 'Unknown').
+            confidence (float): Single-frame confidence [0, 1].
+
+        Returns:
+            Tuple[str, float]: (voted_name, mean_confidence_of_voted_class)
+        """
+        center = self._center(box)
+        tid = self._match(center)
+
+        if tid is None:
+            tid = self._next_id
+            self._next_id += 1
+            self._history[tid] = deque(maxlen=self.window)
+            self._missed[tid]  = 0
+
+        self._centers[tid] = center
+        self._missed[tid]  = 0
+        self._history[tid].append((name, confidence))
+
+        # Majority vote over window
+        labels = [n for n, _ in self._history[tid]]
+        counts = Counter(labels)
+        top_name, top_count = counts.most_common(1)[0]
+
+        # Only accept the vote if it holds > half the window.
+        if top_count > len(labels) / 2:
+            matched_confs = [c for n, c in self._history[tid] if n == top_name]
+            return top_name, float(np.mean(matched_confs))
+        return "Unknown", 0.0
+
+    def expire(self, active_boxes: list) -> None:
+        """Age absent tracks and remove stale ones.
+
+        Call once per frame after processing all active detections.
+
+        Parameters:
+            active_boxes: List of bounding boxes present in the current frame.
+        """
+        active_centers = [self._center(b) for b in active_boxes]
+        covered: set = set()
+        for c in active_centers:
+            tid = self._match(c)
+            if tid is not None:
+                covered.add(tid)
+
+        for tid in list(self._history.keys()):
+            if tid not in covered:
+                self._missed[tid] = self._missed.get(tid, 0) + 1
+
+        stale = [t for t, m in self._missed.items() if m >= self.max_missed_frames]
+        for tid in stale:
+            self._history.pop(tid, None)
+            self._centers.pop(tid, None)
+            self._missed.pop(tid, None)
 
 
 def _load_or_build_prototypes(embeddings_dir: str) -> tuple[np.ndarray, np.ndarray]:
@@ -80,6 +210,7 @@ def recognize_realtime(
     backend: str = "auto",
     onnx_model_path: str = "models/arcface.onnx",
     camera_id: int = 0,
+    vote_frames: int = 7,
 ) -> None:
     """Run real-time webcam recognition using prototype similarity matching.
 
@@ -137,14 +268,18 @@ def recognize_realtime(
     # ----------------------------------------------------------------
     tracker = FaceTracker(alpha=0.7, max_missed_frames=10)
 
-    # Minimum face width (pixels) below which small-face mode activates.
+    # ── Frame-vote stabiliser: one rolling majority-vote history per face. ─
+    # vote_frames=5 means a label must win >2 of the last 5 frame predictions
+    # before it is displayed, eliminating single-frame flicker.
+    voter = FrameVoter(window=vote_frames, max_missed_frames=12)
     SMALL_FACE_PX = 100
 
     print("=" * 80)
     print("Few-Shot Face Recognition Started  [Distance-Robust Mode]")
     print(f"Backend       : {embedder.backend_name}")
     print(f"Metric        : {metric}")
-    print(f"Threshold     : {threshold}  (auto-reduced by 0.05 for small faces, min 0.65)")
+    print(f"Threshold     : {threshold}  (auto-reduced by 0.05 for small faces, min 0.40)")
+    print(f"Vote window   : {vote_frames} frames  (majority vote for stability)")
     print(f"Known classes : {len(class_names)}")
     print(f"Resolution    : {actual_w}x{actual_h}")
     print("Press 'q' to stop")
@@ -162,12 +297,10 @@ def recognize_realtime(
             # Lower min_confidence (0.85) improves recall for small distant faces.
             detections = detect_faces(frame, detector, min_confidence=0.85, padding=0.12)
 
-            # ----------------------------------------------------------------
-            # Expire stale tracks for faces no longer in frame, then process
-            # each active detection.
-            # ----------------------------------------------------------------
+            # Expire stale tracks (embedding smoother AND vote history).
             active_boxes = [det.box for det in detections]
             tracker.expire_tracks(active_boxes)
+            voter.expire(active_boxes)
 
             # Evaluate each detected face independently.
             for det in detections:
@@ -215,18 +348,30 @@ def recognize_realtime(
                 # at 0.65 to preserve identity discrimination.
                 # ----------------------------------------------------------
                 if small_face:
-                    effective_threshold = max(0.65, threshold - 0.05)
+                    effective_threshold = max(0.40, threshold - 0.05)
                 else:
                     effective_threshold = threshold
 
                 # Similarity comparison + threshold-based identity decision.
-                result = predict_with_prototypes(
+                raw_result = predict_with_prototypes(
                     query_embedding=embedding,
                     prototypes=prototypes,
                     class_names=class_names,
                     metric=metric,
                     threshold=effective_threshold,
                 )
+
+                # ── Majority-vote stabilisation ───────────────────────
+                # Replace the raw single-frame prediction with the label that
+                # won the majority vote over the last `vote_frames` frames.
+                voted_name, voted_conf = voter.vote(
+                    box=det.box,
+                    name=str(raw_result["name"]),
+                    confidence=float(raw_result["confidence"]),
+                )
+                result = dict(raw_result)   # copy to avoid mutating original
+                result["name"]       = voted_name
+                result["confidence"] = voted_conf
 
                 name = str(result["name"])
                 confidence = float(result["confidence"])
@@ -332,14 +477,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.70,
+        default=0.60,
         help="Threshold for known/unknown decision",
     )
     parser.add_argument(
         "--backend",
         default="auto",
-        choices=["auto", "facenet", "onnx"],
-        help="Embedding backend",
+        choices=["auto", "facenet", "onnx", "insightface"],
+        help="Embedding backend (insightface = ArcFace, highest accuracy)",
     )
     parser.add_argument(
         "--onnx-model-path",
@@ -347,6 +492,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to ONNX face embedding model",
     )
     parser.add_argument("--camera-id", type=int, default=0, help="Webcam device id")
+    parser.add_argument(
+        "--vote-frames",
+        type=int,
+        default=7,
+        help="Majority-vote window: number of consecutive frames used to stabilise the decision (default: 7)",
+    )
     return parser.parse_args()
 
 
@@ -359,4 +510,5 @@ if __name__ == "__main__":
         backend=args.backend,
         onnx_model_path=args.onnx_model_path,
         camera_id=args.camera_id,
+        vote_frames=args.vote_frames,
     )

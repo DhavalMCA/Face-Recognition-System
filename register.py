@@ -62,17 +62,32 @@ def register_person(
         multiple distances so the resulting class prototype is robust to
         real-world distance variation during live recognition.
     """
-    # Enrollment phase boundaries.
-    # Phase 1 ends at image CLOSE_END (exclusive); Phase 2 ends at MED_END.
-    # Any captures from MED_END onwards belong to Phase 3 (far range).
-    CLOSE_END = 3          # images 1-3  → close range
-    MED_END   = 6          # images 4-6  → medium range
-    # images 7+ → slightly far range
+    # ── Enrollment phase boundaries ────────────────────────────────
+    # 10 images → 4 close  (images 1-4)
+    #           + 3 medium (images 5-7)
+    #           + 3 far    (images 8-10)
+    CLOSE_END = 4   # first CLOSE_END captures → close/angles
+    MED_END   = 7   # next MED_END-CLOSE_END  → medium
+    # remaining                               → far
 
     PHASE_INSTRUCTIONS = {
-        1: "Stay close to camera (0.5-1 m)   [Phase 1/3 - Close]",
-        2: "Step back slightly - medium distance (1-1.5 m)   [Phase 2/3 - Medium]",
-        3: "Step back further for next samples (1.5-2.5 m)   [Phase 3/3 - Far]",
+        1: "Close range (0.5-1 m) - vary angles slightly  [Phase 1/3]",
+        2: "Medium distance (1-1.5 m) - look naturally   [Phase 2/3]",
+        3: "Step back 2-2.5 m - slightly far             [Phase 3/3]",
+    }
+    # Per-capture sub-instructions for angle diversity.
+    # Keys are 1-based capture indices (1 = first capture).
+    CAPTURE_HINTS = {
+        1: "Look straight at camera",
+        2: "Tilt head slightly LEFT",
+        3: "Tilt head slightly RIGHT",
+        4: "Look straight, smile slightly",
+        5: "Look straight (medium distance)",
+        6: "Turn chin slightly UP",
+        7: "Turn chin slightly DOWN",
+        8: "Look straight (far)",
+        9: "Tilt head slightly LEFT (far)",
+        10: "Look straight, normal expression",
     }
     PHASE_COLORS = {
         1: (0, 200, 255),   # cyan   - close
@@ -102,10 +117,15 @@ def register_person(
     print(PHASE_INSTRUCTIONS[1])
     print("=" * 70)
 
+    # ── Quality gate: minimum Laplacian variance to reject blurry frames.
+    # Blurry crops produce noisy embeddings.  Faces with sharpness below
+    # BLUR_THRESHOLD are silently skipped until a sharper frame arrives.
+    BLUR_THRESHOLD = 60.0
+
     # Runtime counters used to control sampling quality and spacing.
     captured = 0
     frame_count = 0
-    min_frame_gap = 8
+    min_frame_gap = 6   # Slightly tighter gap = faster capture
 
     try:
         while captured < num_images:
@@ -150,6 +170,19 @@ def register_person(
                     key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]),
                 )
 
+                # ── Blur quality gate ──────────────────────────────────
+                # Compute Laplacian variance on the grayscale face crop.
+                # Low variance = blurry image = reject to protect embedding quality.
+                gray_face = cv2.cvtColor(largest.face_rgb, cv2.COLOR_RGB2GRAY)
+                sharpness = float(cv2.Laplacian(gray_face, cv2.CV_64F).var())
+                if sharpness < BLUR_THRESHOLD:
+                    blur_msg = f"Too blurry (sharpness={sharpness:.0f}<{BLUR_THRESHOLD:.0f}) — skipping"
+                    cv2.putText(frame, blur_msg, (10, frame.shape[0] - 50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 80, 255), 2)
+                    cv2.imshow("Registration - FewShotFace", frame)
+                    cv2.waitKey(1)
+                    continue
+
                 # Image preprocessing for storage: convert RGB crop to BGR
                 # because OpenCV writes images in BGR format.
                 face_bgr = cv2.cvtColor(largest.face_rgb, cv2.COLOR_RGB2BGR)
@@ -158,8 +191,9 @@ def register_person(
                 cv2.imwrite(str(save_path), face_bgr)
                 captured += 1
 
+                hint = CAPTURE_HINTS.get(captured, "Look naturally")
                 print(
-                    f"  [{captured}/{num_images}] Captured — {PHASE_INSTRUCTIONS[phase]}"
+                    f"  [{captured}/{num_images}] Captured  →  {hint}  |  sharpness={sharpness:.0f}"
                 )
 
                 # Announce next phase when boundary is crossed.
@@ -195,16 +229,27 @@ def register_person(
                 2,
             )
 
-            # --- Overlay: phase instruction bar ---
+            # --- Overlay: phase instruction + per-capture angle hint ---
             instruction = PHASE_INSTRUCTIONS[phase]
             cv2.putText(
                 frame,
                 instruction,
-                (10, frame.shape[0] - 20),
+                (10, frame.shape[0] - 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.60,
+                0.58,
                 pcolor,
                 2,
+            )
+            # Show the per-capture angle hint for the NEXT capture.
+            next_hint = CAPTURE_HINTS.get(captured + 1, "Look naturally")
+            cv2.putText(
+                frame,
+                f"Next: {next_hint}",
+                (10, frame.shape[0] - 14),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                (200, 200, 200),
+                1,
             )
 
             cv2.imshow("Registration - FewShotFace", frame)
@@ -247,8 +292,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-images",
         type=int,
-        default=8,
-        help="Number of face images to capture (recommended: 8 — 3 close + 3 medium + 2 far)",
+        default=10,
+        help="Number of face images to capture (recommended: 10 — 4 close + 3 medium + 3 far)",
     )
     parser.add_argument("--dataset-dir", default="dataset", help="Dataset root directory")
     parser.add_argument("--camera-id", type=int, default=0, help="Webcam device id")
