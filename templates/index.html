@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FewShotFace — Face Recognition Dashboard</title>
+    <meta name="description" content="Real-time few-shot face recognition system dashboard">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+    <div class="glow-orb orb-1"></div>
+    <div class="glow-orb orb-2"></div>
+    <div class="glow-orb orb-3"></div>
+
+    <header class="glass-header">
+        <div class="header-inner">
+            <div class="logo">
+                <div class="logo-icon">👤</div>
+                <div class="logo-text">
+                    <h1>FewShotFace</h1>
+                    <span>Real-Time Few-Shot Face Recognition</span>
+                </div>
+            </div>
+            <div class="status-badge" id="statusBadge">
+                <div class="pulse-ring"></div>
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Checking...</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="dashboard-grid">
+        <section class="panel-left">
+            <div class="glass-card reveal" style="animation-delay: 0.08s;">
+                <div class="card-header">
+                    <div class="card-title"><span class="step-badge">1</span> Enrollment</div>
+                </div>
+                <form onsubmit="registerUser(event)">
+                    <div class="form-group">
+                        <label for="regName">Person Name <span class="required-badge">Required</span></label>
+                        <div class="input-wrapper">
+                            <span class="input-icon">👤</span>
+                            <input type="text" id="regName" class="glass-input has-icon" placeholder="Type full name here — e.g. Dhaval" required autofocus autocomplete="off">
+                        </div>
+                        <p class="input-hint">↑ Enter the person's name to enroll, then click Capture Faces</p>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="regImages">Num Images</label>
+                            <input type="number" id="regImages" class="glass-input" value="5" min="2" max="30">
+                        </div>
+                        <div class="form-group">
+                            <label for="regCamera">Camera ID</label>
+                            <input type="number" id="regCamera" class="glass-input" value="0" min="0">
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary" id="btnRegister">
+                        <span class="spinner"></span>
+                        <span class="btn-text">📸 Capture Faces</span>
+                    </button>
+                </form>
+            </div>
+
+            <div class="glass-card reveal" style="animation-delay: 0.16s;">
+                <div class="card-header">
+                    <div class="card-title"><span class="step-badge">2</span> Training</div>
+                </div>
+                <div class="form-group">
+                    <label for="embBackend">Embedding Backend</label>
+                    <select id="embBackend" class="glass-input">
+                        <option value="auto">Auto (ONNX / FaceNet)</option>
+                        <option value="facenet">FaceNet (PyTorch)</option>
+                        <option value="onnx">ONNX (ArcFace)</option>
+                    </select>
+                </div>
+                <div class="progress-wrap" id="trainProgressWrap">
+                    <div class="progress-meta">
+                        <span>Training Progress</span>
+                        <span id="trainProgressText">0%</span>
+                    </div>
+                    <div class="progress-track">
+                        <div class="progress-bar" id="trainProgressBar"></div>
+                    </div>
+                </div>
+                <button class="btn btn-primary" id="btnEmbeddings" onclick="generateEmbeddings()">
+                    <span class="spinner"></span>
+                    <span class="btn-text">🧠 Generate Embeddings</span>
+                </button>
+            </div>
+
+            <div class="glass-card reveal" style="animation-delay: 0.24s;">
+                <div class="card-header">
+                    <div class="card-title"><span class="step-badge">3</span> Monitoring</div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="recMetric">Similarity</label>
+                        <select id="recMetric" class="glass-input">
+                            <option value="cosine">Cosine</option>
+                            <option value="euclidean">Euclidean</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="recBackend">Backend</label>
+                        <select id="recBackend" class="glass-input">
+                            <option value="auto">Auto</option>
+                            <option value="facenet">FaceNet</option>
+                            <option value="onnx">ONNX</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Strictness: <span class="threshold-display" id="thresholdVal">0.70</span></label>
+                        <div class="slider-container">
+                            <input type="range" id="recThreshold" class="glass-slider" min="0.4" max="1.0" step="0.05"
+                                value="0.70"
+                                oninput="document.getElementById('thresholdVal').textContent = parseFloat(this.value).toFixed(2)">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="recCamera">Camera ID</label>
+                        <input type="number" id="recCamera" class="glass-input" value="0" min="0">
+                    </div>
+                </div>
+                <button class="btn btn-success" id="btnRecognize" onclick="startRecognition()">
+                    <span class="spinner"></span>
+                    <span class="btn-text">🎯 Start Live Recognition</span>
+                </button>
+            </div>
+        </section>
+
+        <section class="panel-center reveal" style="animation-delay: 0.32s;">
+            <div class="camera-container" id="cameraContainer">
+                <div class="camera-glow-border"></div>
+                <div class="camera-content">
+                    <span class="camera-status-badge" id="cameraStatusBadge">
+                        <span class="status-dot waiting"></span>
+                        <span id="cameraStatusText">Waiting for camera...</span>
+                    </span>
+                    <div class="cam-icon">📷</div>
+                    <h3>Live Camera Feed</h3>
+                    <p>Start enrollment or monitoring to activate.<br><span class="muted-note">(Camera opens in a native desktop window)</span></p>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel-right">
+            <div class="stats-row reveal" style="animation-delay: 0.40s;">
+                <div class="glass-stat">
+                    <div class="stat-value" id="statUsers">-</div>
+                    <div class="stat-label">Users</div>
+                </div>
+                <div class="glass-stat">
+                    <div class="stat-value" id="statImages">-</div>
+                    <div class="stat-label">Images</div>
+                </div>
+                <div class="glass-stat">
+                    <div class="stat-value" id="statBackend">-</div>
+                    <div class="stat-label" id="statStatus">Backend</div>
+                </div>
+            </div>
+
+            <div class="glass-card reveal" style="animation-delay: 0.48s;">
+                <div class="card-header">
+                    <div class="card-title">👥 Enrolled Users</div>
+                    <button class="btn-icon" onclick="loadUsers()" title="Refresh">↻</button>
+                </div>
+                <div class="users-list" id="usersGrid">
+                    <div class="no-data">Loading users...</div>
+                </div>
+            </div>
+
+            <div class="glass-card reveal" style="animation-delay: 0.56s;">
+                <div class="card-header">
+                    <div class="card-title">🛰 Latest Detection</div>
+                </div>
+                <div class="latest-detection" id="latestDetection">
+                    <div class="detect-name" id="latestDetectionName">No detection yet</div>
+                    <div class="detect-meta" id="latestDetectionMeta">Waiting for recognition...</div>
+                </div>
+            </div>
+
+            <div class="glass-card reveal flex-grow" style="animation-delay: 0.64s;">
+                <div class="card-header">
+                    <div class="card-title">📋 Activity Log</div>
+                    <button class="btn-icon" onclick="clearLog()" title="Clear Log">⌫</button>
+                </div>
+                <div class="log-console" id="logConsole">
+                    <div class="log-entry"><span class="log-info">System initialized...</span></div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/js/ui-effects.js"></script>
+    <script>
+        const API = '';
+
+        function log(message, type = 'info') {
+            const consoleEl = document.getElementById('logConsole');
+            const now = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry reveal-inline';
+
+            let colorClass = 'var(--text-sec)';
+            if (type === 'success') colorClass = 'var(--success)';
+            if (type === 'error') colorClass = 'var(--danger)';
+            if (type === 'warn') colorClass = '#F59E0B';
+
+            entry.innerHTML = `<span class="log-time">[${now}]</span> <span style="color: ${colorClass};">${message}</span>`;
+            consoleEl.appendChild(entry);
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('logConsole').innerHTML = '';
+            log('Log cleared', 'info');
+        }
+
+        function setLoading(btnId, loading) {
+            const btn = document.getElementById(btnId);
+            if (loading) {
+                btn.classList.add('loading');
+                btn.disabled = true;
+            } else {
+                btn.classList.remove('loading');
+                btn.disabled = false;
+            }
+        }
+
+        function setTrainingProgress(value) {
+            const safeValue = Math.max(0, Math.min(100, Number(value) || 0));
+            const bar = document.getElementById('trainProgressBar');
+            const text = document.getElementById('trainProgressText');
+            bar.style.width = `${safeValue}%`;
+            text.textContent = `${Math.round(safeValue)}%`;
+        }
+
+        function updateLatestDetection(name, detail) {
+            document.getElementById('latestDetectionName').textContent = name;
+            document.getElementById('latestDetectionMeta').textContent = detail;
+        }
+
+        async function checkHealth() {
+            try {
+                const res = await fetch(`${API}/health`);
+                await res.json();
+                document.getElementById('statusText').textContent = 'Online';
+                document.getElementById('statusDot').style.background = 'var(--success)';
+                document.getElementById('statusBadge').classList.add('online');
+                log('Server is online', 'success');
+                return true;
+            } catch (e) {
+                document.getElementById('statusText').textContent = 'Offline';
+                document.getElementById('statusDot').style.background = 'var(--danger)';
+                document.getElementById('statusBadge').classList.remove('online');
+                log('Server is offline: ' + e.message, 'error');
+                return false;
+            }
+        }
+
+        async function loadUsers() {
+            try {
+                const res = await fetch(`${API}/api/users/details`);
+                const data = await res.json();
+                const grid = document.getElementById('usersGrid');
+
+                if (data.users.length === 0) {
+                    grid.innerHTML = '<div class="no-data">No users enrolled yet.</div>';
+                    document.getElementById('statUsers').textContent = '0';
+                    document.getElementById('statImages').textContent = '0';
+                    return;
+                }
+
+                let totalImages = 0;
+                grid.innerHTML = data.users.map((u) => {
+                    totalImages += u.images;
+                    const initial = u.name.charAt(0).toUpperCase();
+                    return `
+                        <div class="user-row">
+                            <div class="user-avatar">${initial}</div>
+                            <div class="user-info">
+                                <div class="user-name">${u.name}</div>
+                                <div class="user-meta">${u.images} images</div>
+                            </div>
+                            <div class="user-status">✅</div>
+                        </div>
+                    `;
+                }).join('');
+
+                document.getElementById('statUsers').textContent = data.users.length;
+                document.getElementById('statImages').textContent = totalImages;
+                log(`Loaded ${data.users.length} users`, 'success');
+            } catch (e) {
+                log('Failed to load users', 'error');
+            }
+        }
+
+        async function registerUser(event) {
+            event.preventDefault();
+            const name = document.getElementById('regName').value.trim();
+            const numImages = parseInt(document.getElementById('regImages').value, 10);
+            const cameraId = parseInt(document.getElementById('regCamera').value, 10);
+
+            if (!name) {
+                log('Please enter a name', 'error');
+                return;
+            }
+
+            setLoading('btnRegister', true);
+            document.getElementById('cameraStatusText').textContent = 'Camera active for enrollment...';
+            log(`Capturing "${name}" (${numImages} imgs)...`, 'info');
+
+            try {
+                const res = await fetch(`${API}/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, num_images: numImages, camera_id: cameraId })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    log(`✓ ${data.message}`, 'success');
+                    updateLatestDetection(name, `Enrollment completed at ${new Date().toLocaleTimeString()}`);
+                    loadUsers();
+                    document.getElementById('regName').value = '';
+                } else {
+                    log(`✗ Registration failed: ${data.detail}`, 'error');
+                }
+            } catch (e) {
+                log('✗ Network error', 'error');
+            } finally {
+                setLoading('btnRegister', false);
+                document.getElementById('cameraStatusText').textContent = 'Waiting for camera...';
+            }
+        }
+
+        async function generateEmbeddings() {
+            const backend = document.getElementById('embBackend').value;
+            setLoading('btnEmbeddings', true);
+            setTrainingProgress(12);
+            let progressPulse = window.setInterval(() => {
+                const current = Number(document.getElementById('trainProgressBar').style.width.replace('%', '')) || 12;
+                if (current < 90) {
+                    setTrainingProgress(current + 3);
+                }
+            }, 180);
+
+            log(`Training (backend: ${backend})...`, 'info');
+
+            try {
+                const res = await fetch(`${API}/embeddings/update`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ backend })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    setTrainingProgress(100);
+                    log(`✓ ${data.message}`, 'success');
+                    document.getElementById('statBackend').textContent = backend === 'auto' ? 'Auto' : backend.toUpperCase();
+                    updateLatestDetection('Model Updated', `Embeddings generated at ${new Date().toLocaleTimeString()}`);
+                } else {
+                    setTrainingProgress(0);
+                    log(`✗ Embedding failed: ${data.detail}`, 'error');
+                }
+            } catch (e) {
+                setTrainingProgress(0);
+                log('✗ Network error', 'error');
+            } finally {
+                window.clearInterval(progressPulse);
+                setLoading('btnEmbeddings', false);
+            }
+        }
+
+        async function startRecognition() {
+            const metric = document.getElementById('recMetric').value;
+            const threshold = parseFloat(document.getElementById('recThreshold').value);
+            const backend = document.getElementById('recBackend').value;
+            const cameraId = parseInt(document.getElementById('recCamera').value, 10);
+
+            setLoading('btnRecognize', true);
+            document.getElementById('cameraStatusText').textContent = 'Camera active for recognition...';
+            log(`Monitoring (${metric}, th=${threshold.toFixed(2)})...`, 'info');
+
+            try {
+                const res = await fetch(`${API}/recognition/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ metric, threshold, backend, camera_id: cameraId })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    log(`✓ ${data.message} — Press 'q' to stop.`, 'success');
+                    updateLatestDetection('Recognition Started', `Metric: ${metric} • Threshold: ${threshold.toFixed(2)}`);
+                } else {
+                    log(`✗ Failed: ${data.detail}`, 'error');
+                }
+            } catch (e) {
+                log('✗ Network error', 'error');
+            } finally {
+                setLoading('btnRecognize', false);
+                document.getElementById('cameraStatusText').textContent = 'Waiting for camera...';
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            setTrainingProgress(0);
+            const online = await checkHealth();
+            if (online) {
+                loadUsers();
+                document.getElementById('statBackend').textContent = 'Auto';
+            }
+        });
+    </script>
+</body>
+
+</html>

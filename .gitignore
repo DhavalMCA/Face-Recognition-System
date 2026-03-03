@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pkl
+*.npy
+dataset/
+embeddings/
+venv/
+.env
+instance/
+*.log
+
+# Local wheel files
+*.whl
+
