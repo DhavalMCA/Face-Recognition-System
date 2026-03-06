@@ -169,6 +169,9 @@ FewShotFace/
   - Enroll lookalike family members as separate identities
 - Missing prototype files:
   - Run Step 2 again (`generate_embeddings.py`)
+- ONNX model error (`INVALID_PROTOBUF` for `models/arcface.onnx`):
+  - The app now auto-falls back to `models/w600k_r50.onnx` (or FaceNet if ONNX is unavailable), so GUI/recognition should still start.
+  - If you want ArcFace specifically, replace `models/arcface.onnx` with a valid file from a trusted source.
 
 ## 10. Delivery Notes for Client Demo
 
