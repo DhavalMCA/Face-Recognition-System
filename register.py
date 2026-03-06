@@ -23,7 +23,7 @@ from pathlib import Path
 
 import cv2
 
-from utils import detect_faces, ensure_dir, load_face_detector
+from utils import detect_faces, ensure_dir, load_face_detector, score_face_quality
 
 
 def register_person(
@@ -117,10 +117,10 @@ def register_person(
     print(PHASE_INSTRUCTIONS[1])
     print("=" * 70)
 
-    # ── Quality gate: minimum Laplacian variance to reject blurry frames.
-    # Blurry crops produce noisy embeddings.  Faces with sharpness below
-    # BLUR_THRESHOLD are silently skipped until a sharper frame arrives.
-    BLUR_THRESHOLD = 60.0
+    # ── Quality gate: composite quality score (sharpness + brightness + contrast).
+    # Faces below QUALITY_THRESHOLD are silently skipped so blurry / dark
+    # enrollment images cannot degrade the class prototype.
+    QUALITY_THRESHOLD = 0.28
 
     # Runtime counters used to control sampling quality and spacing.
     captured = 0
@@ -170,14 +170,11 @@ def register_person(
                     key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]),
                 )
 
-                # ── Blur quality gate ──────────────────────────────────
-                # Compute Laplacian variance on the grayscale face crop.
-                # Low variance = blurry image = reject to protect embedding quality.
-                gray_face = cv2.cvtColor(largest.face_rgb, cv2.COLOR_RGB2GRAY)
-                sharpness = float(cv2.Laplacian(gray_face, cv2.CV_64F).var())
-                if sharpness < BLUR_THRESHOLD:
-                    blur_msg = f"Too blurry (sharpness={sharpness:.0f}<{BLUR_THRESHOLD:.0f}) — skipping"
-                    cv2.putText(frame, blur_msg, (10, frame.shape[0] - 50),
+                # ── Quality gate (composite: sharpness + brightness + contrast) ─
+                quality = score_face_quality(largest.face_rgb)
+                if quality < QUALITY_THRESHOLD:
+                    q_msg = f"Low quality ({quality:.2f} < {QUALITY_THRESHOLD}) — skipping"
+                    cv2.putText(frame, q_msg, (10, frame.shape[0] - 50),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 80, 255), 2)
                     cv2.imshow("Registration - FewShotFace", frame)
                     cv2.waitKey(1)
@@ -193,7 +190,7 @@ def register_person(
 
                 hint = CAPTURE_HINTS.get(captured, "Look naturally")
                 print(
-                    f"  [{captured}/{num_images}] Captured  →  {hint}  |  sharpness={sharpness:.0f}"
+                    f"  [{captured}/{num_images}] Captured  ->  {hint}  |  quality={quality:.2f}"
                 )
 
                 # Announce next phase when boundary is crossed.

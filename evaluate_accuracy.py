@@ -512,9 +512,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=["auto", "facenet", "onnx", "insightface"],
+        choices=["auto", "facenet", "onnx", "insightface", "deepface"],
         default="auto",
-        help="Embedding backend (auto selects InsightFace > ONNX > FaceNet).",
+        help="Embedding backend (auto selects InsightFace > ONNX > FaceNet; deepface = multi-model via DeepFace library).",
     )
     parser.add_argument(
         "--quiet", "-q",

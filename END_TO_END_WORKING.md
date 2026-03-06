@@ -1,174 +1,186 @@
-# End-to-End Working of the Few-Shot Face Recognition System
+# End-to-End Working Guide (Client Version)
 
-## 1. Introduction
-This project is a real-time face recognition system designed to operate on a **few-shot learning** basis. While traditional CNN-based systems (like VGG or ResNet) require hundreds of images per person and complete model retraining when a new user is added, this system achieves high accuracy with only **5 to 10 images per person** and incorporates new users in seconds by computing "Prototypes" (mean embedding vectors), completely eliminating the need for GPUs or retraining.
+This document explains exactly how the FewShotFace system works from enrollment to live recognition, with clear inputs, outputs, and optimization points.
 
----
+## 1. Goal
 
-## 2. Core Methodologies to Solve Real-World Problems
-- **Problem 1: Few Samples per User**  
-  *Solution*: Uses prototype-based matching. It translates face images into high-dimensional vectors and creates an "average" vector (prototype) for each person.
-- **Problem 2: Domain Gap (Mobile vs. Webcam)**  
-  *Solution*: Normalizes mobile-captured photos to match the webcam distribution using a custom pipeline (White-balance correction + CLAHE + Unsharp masking).
-- **Problem 3: Family Member Confusion (Similar Faces)**  
-  *Solution*: High precision cosine-similarity thresholds (recommended `0.80`) combined with separate distinct prototype registration for similar-looking people.
-- **Problem 4: Distance Variation (2–3 m from webcam)**  
-  *Solution*: High-resolution capture (1280 × 720), MTCNN tuned for small faces, auto-zoom CLAHE crop, per-face EMA temporal smoothing, and adaptive thresholding reduce false "Unknown" at medium and far range.
+Build a practical face recognition pipeline that:
+- Works with small data per user (few-shot)
+- Supports quick onboarding of new users
+- Runs in real time on webcam
+- Remains stable under lighting and distance variation
 
----
+## 2. High-Level Pipeline
 
-## 3. End-to-End Workflow Pipelines
-
-The system executes a strictly sequential pipeline to recognize faces. 
-
-### Step 1: Face Enrollment (`register.py`)
-- **Goal**: Register a person's facial features into the database at **multiple distances**.
-- **Process**: A user stands in front of the webcam. The script captures frames across three guided phases. **MTCNN** precisely localizes the face, crops it, and saves it.
-
-  | Phase | Count | Distance | On-screen colour |
-  |---|---|---|---|
-  | 1 — Close  | 3 images | 0.5–1 m   | Cyan  |
-  | 2 — Medium | 3 images | 1–1.5 m   | Green |
-  | 3 — Far    | 2 images | 1.5–2.5 m | Orange |
-
-  The script prints *"Step back slightly for next samples"* at each phase change.
-- **Output**: 8 saved cropped images in `dataset/<PersonName>/`, named with phase tag (`_p1`, `_p2`, `_p3`).
-
-### Step 2: Lighting & Domain Normalization (`fix_mobile_photos.py`) — *Optional*
-- **Goal**: Fix lighting imbalances, especially if photos were provided via a smartphone instead of the active webcam.
-- **Process**: 
-  1. **Grey-world white balance**: Removes warm/cool camera tints.
-  2. **CLAHE**: Equalizes brightness without shifting colors.
-  3. **Unsharp mask**: Recovers fine facial details compressed by phone cameras.
-  4. **MTCNN**: Re-detects and rigidly aligns the face at consistent scaling.
-- **Output**: Clean, normalized dataset images.
-
-### Step 3: Embeddings & Prototype Generation (`generate_embeddings.py`)
-- **Goal**: Convert pixel data into mathematical feature representation.
-- **Process**: 
-  - Every cropped face image in the dataset is passed through a pre-trained deep learning model (Primary: **ArcFace ONNX**, Fallback: **FaceNet PyTorch**). 
-  - The model outputs a dense numerical array (an embedding vector) representing facial geometry.
-  - The system then calculates a **Mean Class Prototype**: the mathematical average of all vectors for a single person.
-- **Output**: The extracted mean representations are saved to disk (`embeddings/prototypes.npy` and `embeddings/class_names.npy`).
-
-### Step 4: Live Recognition (`recognize.py`)
-- **Goal**: Identify faces streaming from the active camera in real time, including subjects at 2–3 m distance.
-- **Process**:
-  1. **Capture**: A live frame is grabbed from the webcam at **1280 × 720** resolution.
-  2. **Detect**: MTCNN (tuned for small faces: `min_face_size=20`, thresholds `[0.5, 0.6, 0.6]`) finds the live face and crops it.
-  3. **Small-face check**: If bounding box width < 100 px the system enters *distance mode*:
-     - Expands the crop by 25 % on all sides in the full-resolution frame.
-     - Applies **CLAHE** contrast normalisation on the luminance channel.
-     - Resizes to 160 × 160 with bicubic interpolation.
-  4. **Embed**: The crop is passed through ArcFace/FaceNet to generate a live embedding vector.
-  5. **Temporal smoothing**: **EMA** (`α = 0.7`) is applied per tracked face. Tracks reset after 10 consecutive missed frames.
-  6. **Adaptive threshold**: In distance mode the decision threshold is lowered by 0.05 (clamped at 0.65) to reduce false "Unknown" at range.
-  7. **Compare**: Cosine Similarity (or Euclidean Distance) between the smoothed embedding and all saved `prototypes.npy`.
-  8. **Decide**: If the highest similarity score exceeds the effective threshold the identity is accepted; otherwise labelled "Unknown".
-- **Output**: Visual bounding box with Name, Confidence, Score, effective Threshold, and `dist-mode` indicator drawn on the feed.
-
-### Step 5: Accuracy Verification (`evaluate_accuracy.py`)
-- **Goal**: Scientifically prove the system's accuracy against recognized metrics.
-- **Process**: Runs a One-vs-Rest calculation for all images to measure True Positives, True Negatives, False Positives, and False Negatives. 
-- **Output**: Prints statistical Sensitivity, Specificity, Accuracy, and an F1 score, automatically comparing the results against baselines like VGG-16, ResNet-50, and MobileNet.
-
----
-
----
-
-## 4. Distance-Robust Recognition Pipeline (v2)
-
-This section describes the internal flow activated when a face is detected at
-medium or far range (bounding box width < 100 px).
-
-```
-Full 1280×720 frame
-        │
-        ▼
-MTCNN detection  (min_face_size=20, thresholds=[0.5,0.6,0.6])
-        │
-        ├─ face_width ≥ 100 px  ──► standard face_rgb crop
-        │
-        └─ face_width < 100 px  ──► SMALL FACE MODE
-                │
-                ├─ Expand box 25% in original full frame
-                ├─ Crop expanded region
-                ├─ CLAHE contrast enhancement (LAB luminance)
-                └─ Bicubic resize to 160×160
-                │
-                ▼
-        ArcFace / FaceNet embedding
-                │
-                ▼
-        FaceTracker EMA smoothing
-        smoothed = 0.7 * current + 0.3 * previous_smoothed
-        (reset after 10 missed frames)
-                │
-                ▼
-        Adaptive threshold
-        effective_thr = max(0.65, base_thr - 0.05)  ← small face only
-                │
-                ▼
-        Cosine similarity vs. prototypes
-                │
-        ┌───────┴────────┐
-     Known              Unknown
+```text
+Step 1: Enroll Faces
+      ->
+Step 2: (Optional) Normalize Mobile Photos
+      ->
+Step 3: Generate Embeddings + Prototypes
+      ->
+Step 4: Run Live Recognition
+      ->
+Step 5: Evaluate Accuracy
 ```
 
-### New utility components
+## 3. Step-by-Step Operational Flow
 
-| File | Symbol | Role |
-|---|---|---|
-| `utils.py` | `apply_clahe_enhancement()` | CLAHE on luminance channel of RGB face crop |
-| `utils.py` | `get_enhanced_crop()` | Expand + CLAHE + bicubic resize for small faces |
-| `utils.py` | `FaceTracker` | Per-face EMA smoother with proximity-based track matching |
-| `utils.py` | `load_face_detector()` | Updated: `min_face_size=20`, thresholds `[0.5,0.6,0.6]` |
-| `recognize.py` | `recognize_realtime()` | 1280×720 stream, all distance-robust stages wired together |
-| `register.py` | `register_person()` | 3-phase multi-range enrollment |
+### Step 1 - Enrollment (`register.py`)
 
----
+Purpose:
+- Capture face samples per identity and store them in `dataset/<name>/`.
 
-## 5. Architectural Interfaces
+Input:
+- Person name
+- Number of images
+- Camera id
 
-The actual ML pipeline is completely detached and can be triggered flawlessly through three available interfaces:
-1. **Desktop GUI (`gui.py`)**: A professional 3-column dark-themed PyQt5 desktop application built for exhibitions using strictly threaded workers to prevent freezing.
-2. **Web Dashboard (`app.py`)**: A FastAPI-powered local web server with a stunning Glassmorphism HTML/CSS/JS frontend interface.
-3. **CLI Scripts**: Standard python terminal execution for silent or programmatic background training and evaluating.
+Command example:
+```powershell
+python register.py --name "Dhaval" --num-images 12 --camera-id 0
+```
 
-## 6. Technology Stack Summary
-- **Backend/Logic**: Python 3.10
-- **Computer Vision**: OpenCV 4.x
-- **Face Detection Layer**: MTCNN (`facenet-pytorch`) — tuned to `min_face_size=20`
-- **Feature Extraction Layer**: ArcFace via `onnxruntime`
-- **Distance-Robust helpers**: `FaceTracker`, `get_enhanced_crop`, `apply_clahe_enhancement` (in `utils.py`)
-- **Mathematics / ML**: `NumPy`, `scikit-learn`
-- **Web App**: `FastAPI` + `Uvicorn`
-- **Desktop App**: `PyQt5`
+Output:
+- Cropped face images in `dataset/Dhaval/`
+
+Optimization used:
+- Multi-pose capture guidance (front, left/right tilt, distance variation)
+- Blur filtering during capture (better training quality)
 
 ---
 
-## 7. Accuracy Benchmarks
+### Step 2 - Photo Normalization (`fix_mobile_photos.py`) [Optional]
 
-Example output from `evaluate_accuracy.py --sweep`:
+Purpose:
+- Reduce quality gap between mobile photos and webcam frames.
 
-| Model | Specificity (%) | Sensitivity (%) | Accuracy (%) |
-|---|---|---|---|
-| VGG-16 | 98.65 | 99.45 | 99.00 |
-| ResNet-50 | 92.50 | 95.00 | 94.00 |
-| GoogleNet | 88.24 | 90.00 | 89.00 |
-| MobileNet | 86.00 | 83.40 | 88.30 |
-| AlexNet | 84.00 | 88.46 | 87.70 |
-| **FewShotFace (ONNX, t=0.80)** | **—** | **—** | **Your result** |
+When to use:
+- If dataset includes phone photos or strong lighting variation.
 
-## 8. Recommended Threshold
+Command example:
+```powershell
+python fix_mobile_photos.py
+```
 
-### Threshold Choice Reasoning
+Output:
+- Improved face images (lighting and sharpness corrected)
 
-| Threshold | Sensitivity | Specificity | Use Case |
-|---|---|---|---|
-| 0.60 | High | Low | Maximum recall, many false positives |
-| 0.70 | Balanced | Balanced | Default — good for solo demo |
-| **0.80** | **Balanced** | **High** | **Recommended — prevents family confusion** |
-| 0.85 | Lower | Very High | Security-critical, may miss valid users |
+Optimization used:
+- White-balance correction
+- CLAHE contrast enhancement
+- Unsharp mask
 
-**For the family confusion problem:** raise threshold to `0.80` AND enroll the family member as a separate identity. Two distinct prototypes allow the model to separate similar faces by comparing relative distances rather than relying solely on the absolute threshold.
+---
+
+### Step 3 - Embedding and Prototype Build (`generate_embeddings.py`)
+
+Purpose:
+- Convert each face image into a numeric embedding and build class prototypes.
+
+Command example:
+```powershell
+python generate_embeddings.py --backend auto
+```
+
+Output files (in `embeddings/`):
+- `embeddings.npy`
+- `labels.npy`
+- `prototypes.npy`
+- `class_names.npy`
+- `backend.json`
+
+Optimization used:
+- L2 normalization for stable similarity comparison
+- Prototype-based few-shot representation
+- Backend fallback strategy (`insightface -> onnx -> facenet`)
+
+---
+
+### Step 4 - Live Recognition (`recognize.py`)
+
+Purpose:
+- Detect and identify faces from live camera stream.
+
+Command example:
+```powershell
+python recognize.py --backend auto --threshold 0.80 --camera-id 0
+```
+
+Live frame flow:
+1. Capture frame from webcam
+2. Detect face(s)
+3. Apply enhanced crop for small/distant faces
+4. Generate embedding for each face
+5. Compare with stored prototypes
+6. Apply threshold and decision logic
+7. Show result overlay (name/confidence)
+
+Optimization used:
+- Frame voting for result stability (`FrameVoter`)
+- Temporal smoothing (`FaceTracker`)
+- Adaptive handling for small faces at distance
+
+---
+
+### Step 5 - Accuracy Evaluation (`evaluate_accuracy.py`)
+
+Purpose:
+- Quantify recognition quality and find optimal threshold.
+
+Command examples:
+```powershell
+python evaluate_accuracy.py --backend auto --threshold 0.80
+python evaluate_accuracy.py --backend auto --sweep
+```
+
+Output:
+- Accuracy metrics and threshold-performance comparison
+
+Optimization used:
+- Threshold sweep to select best operating point per dataset
+
+## 4. Recommended Runtime Settings
+
+- Images per identity: `10-15`
+- Recognition threshold start point: `0.80`
+- Vote frames: `5-7`
+- Camera resolution: `1280x720` (recommended)
+
+## 5. Decision Tuning Guide
+
+If system labels known users as Unknown too often:
+- Add more enrollment images
+- Rebuild embeddings
+- Reduce threshold slightly (for example `0.78`)
+
+If system gives false positives:
+- Increase threshold (`0.82` to `0.86`)
+- Enroll lookalike users as separate identities
+- Rebuild embeddings after enrollment
+
+## 6. Client Demo Checklist
+
+Before demo:
+1. Confirm camera access and lighting
+2. Confirm all required users are enrolled
+3. Regenerate embeddings once
+4. Verify recognition at near and medium distance
+5. Keep fallback thresholds ready (`0.78`, `0.80`, `0.82`)
+6. Run one quick evaluation (`--sweep`) for evidence
+
+## 7. Failure Recovery Checklist
+
+If recognition fails unexpectedly:
+1. Check camera id (`--camera-id 0/1`)
+2. Verify `embeddings/prototypes.npy` exists
+3. Re-run Step 3 (`generate_embeddings.py`)
+4. Re-open app and retest
+
+## 8. Why This Is Client-Friendly
+
+- No model retraining required when adding users
+- Fast onboarding workflow
+- Works on standard CPU machines
+- Usable from GUI or CLI depending on operator preference
+- Includes measurable evaluation for reporting

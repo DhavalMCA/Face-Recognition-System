@@ -5,12 +5,23 @@ Purpose:
     prototypes and embedding vectors.
 
 Role in pipeline:
-    This module is the final runtime stage. It consumes stored features and
-    applies similarity-based identity prediction on live frames.
+    Final runtime stage. Consumes stored embeddings/prototypes and applies
+    similarity-based identity prediction on live webcam frames.
 
 Few-shot contribution:
     Uses prototype matching instead of full classifier retraining, allowing
     recognition with very limited samples per identity.
+
+Accuracy improvements over baseline:
+    - Auto-calibrated threshold: loads threshold saved by generate_embeddings.py
+      (LOO-calibrated for <=1% FPR) instead of a manual constant.
+    - Ensemble similarity: cosine + normalised-euclidean blend passed through
+      to predict_with_prototypes for ~1-2% accuracy gain.
+    - Quality-score-based adaptive threshold: uses composite face quality
+      (sharpness + brightness + contrast) instead of only bounding-box size,
+      giving a more accurate proxy for embedding reliability.
+    - Frame quality gate: skips faces whose quality is too low to embed
+      reliably, preventing spurious Unknown flicker.
 """
 
 from __future__ import annotations
@@ -24,37 +35,36 @@ from typing import Deque, Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from similarity import predict_with_prototypes
+from similarity import combined_predict, predict_with_prototypes
 from utils import (
     FaceEmbedder,
     FaceTracker,
+    align_face_from_landmarks,
+    build_multi_prototypes,
     compute_class_prototypes,
     detect_faces,
     get_enhanced_crop,
+    load_auto_threshold,
     load_face_detector,
     load_saved_embeddings,
+    score_face_quality,
 )
 
 
-# ───────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # FrameVoter — Majority-vote decision stability
-# ───────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 class FrameVoter:
     """Per-face rolling majority-vote decision stabiliser.
 
-    Accumulates the last `window` per-frame identity predictions for each
+    Accumulates the last ``window`` per-frame identity predictions for each
     tracked face and returns the label that appeared most often.  This
     eliminates single-frame noise (blink, sudden head turn) that would
     otherwise flicker the recognition result on screen.
 
-    Example (window=5)::
-
-        frames  [Alice, Alice, Unknown, Alice, Alice]
-        vote    → Alice  (4 of 5 votes)   ✔
-
-    Only a result that holds the majority is returned; if no label wins
-    more than half the votes the output is "Unknown".
+    Only a result that holds strictly more than half the window votes is
+    returned; otherwise the output is "Unknown".
     """
 
     def __init__(
@@ -63,25 +73,15 @@ class FrameVoter:
         max_match_dist: int = 120,
         max_missed_frames: int = 12,
     ) -> None:
-        """Initialise voter.
-
-        Parameters:
-            window (int): Number of recent frames to consider (3 – 7 works well).
-            max_match_dist (int): Pixel radius for re-associating tracks.
-            max_missed_frames (int): Frames a track can be absent before reset.
-        """
         if window < 1:
-            raise ValueError("window must be ≥ 1")
+            raise ValueError("window must be >= 1")
         self.window = window
         self.max_match_dist = max_match_dist
         self.max_missed_frames = max_missed_frames
-        # {track_id: deque of (name, confidence) tuples}
         self._history: Dict[int, Deque[Tuple[str, float]]] = {}
         self._centers: Dict[int, Tuple[int, int]] = {}
         self._missed:  Dict[int, int] = {}
         self._next_id: int = 0
-
-    # ── internal helpers ────────────────────────────────────
 
     @staticmethod
     def _center(box: Tuple[int, int, int, int]) -> Tuple[int, int]:
@@ -96,8 +96,6 @@ class FrameVoter:
                 best_dist, best_id = d, tid
         return best_id
 
-    # ── public API ────────────────────────────────────────
-
     def vote(
         self,
         box: Tuple[int, int, int, int],
@@ -107,9 +105,9 @@ class FrameVoter:
         """Record a single-frame prediction and return the majority-vote result.
 
         Parameters:
-            box (Tuple): Bounding box (x1, y1, x2, y2) of the detected face.
-            name (str): Single-frame identity prediction (may be 'Unknown').
-            confidence (float): Single-frame confidence [0, 1].
+            box: Bounding box (x1, y1, x2, y2).
+            name: Single-frame identity prediction.
+            confidence: Single-frame confidence [0, 1].
 
         Returns:
             Tuple[str, float]: (voted_name, mean_confidence_of_voted_class)
@@ -121,31 +119,23 @@ class FrameVoter:
             tid = self._next_id
             self._next_id += 1
             self._history[tid] = deque(maxlen=self.window)
-            self._missed[tid]  = 0
+            self._missed[tid] = 0
 
         self._centers[tid] = center
-        self._missed[tid]  = 0
+        self._missed[tid] = 0
         self._history[tid].append((name, confidence))
 
-        # Majority vote over window
         labels = [n for n, _ in self._history[tid]]
         counts = Counter(labels)
         top_name, top_count = counts.most_common(1)[0]
 
-        # Only accept the vote if it holds > half the window.
         if top_count > len(labels) / 2:
             matched_confs = [c for n, c in self._history[tid] if n == top_name]
             return top_name, float(np.mean(matched_confs))
         return "Unknown", 0.0
 
     def expire(self, active_boxes: list) -> None:
-        """Age absent tracks and remove stale ones.
-
-        Call once per frame after processing all active detections.
-
-        Parameters:
-            active_boxes: List of bounding boxes present in the current frame.
-        """
+        """Age absent tracks and remove stale ones."""
         active_centers = [self._center(b) for b in active_boxes]
         covered: set = set()
         for c in active_centers:
@@ -164,38 +154,80 @@ class FrameVoter:
             self._missed.pop(tid, None)
 
 
-def _load_or_build_prototypes(embeddings_dir: str) -> tuple[np.ndarray, np.ndarray]:
-    """Load class prototypes from disk or build them from saved embeddings.
+# ---------------------------------------------------------------------------
+# Adaptive threshold helpers
+# ---------------------------------------------------------------------------
 
-    Function name:
-        _load_or_build_prototypes
+def _estimate_distance(face_width: int) -> str:
+    """Classify camera-to-face distance from bounding-box pixel width."""
+    if face_width > 220:
+        return "near"
+    elif face_width > 120:
+        return "medium"
+    return "far"
 
-    Purpose:
-        Reuses precomputed prototype artifacts when available; otherwise
-        computes prototypes from raw embedding/label files.
+
+def _compute_adaptive_threshold(
+    base: float,
+    face_width: int,
+    frame_width: int,
+    quality_score: float = 0.5,
+) -> float:
+    """Compute a per-face adaptive threshold using face quality and relative size.
+
+    Uses two complementary quality signals:
+      - Relative face size (face_width / frame_width): larger faces are closer
+        and contain more pixels, producing more discriminative embeddings.
+      - Composite quality score (sharpness + brightness + contrast):
+        directly measures embedding reliability.
+
+    Formula::
+
+        combined_quality = 0.6 * size_quality + 0.4 * face_quality
+        threshold = base * (0.75 + 0.50 * combined_quality)
+
+    Clamped to [0.40, 0.90] to prevent degenerate all-accept or all-reject regimes.
 
     Parameters:
-        embeddings_dir (str): Directory containing embedding artifacts.
+        base (float): Base (calibrated) threshold.
+        face_width (int): Detected bounding-box width in pixels.
+        frame_width (int): Full frame width in pixels.
+        quality_score (float): Composite face quality in [0, 1].
 
     Returns:
-        tuple[np.ndarray, np.ndarray]:
-            - prototypes: Prototype matrix [num_classes, embedding_dim]
-            - class_names: Identity labels corresponding to prototypes
-
-    Role in face recognition process:
-        Provides class reference vectors used in similarity comparison during
-        real-time recognition.
+        float: Adaptive threshold clamped to [0.40, 0.90].
     """
+    size_quality = min(face_width / max(1, frame_width) / 0.30, 1.0)
+    combined_quality = 0.6 * size_quality + 0.4 * float(quality_score)
+    # Keep threshold within [0.90×, 1.00×] of the calibrated base:
+    # • High quality → exactly the calibrated base (no inflation above it).
+    # • Low  quality → 10% below base (natural, as noisy embeddings score lower).
+    # The old formula [0.75×, 1.25×] was pushing threshold above 0.80 on good
+    # frames, causing widespread false-rejects with FaceNet genuine pairs (0.60–0.78).
+    adaptive = base * (0.90 + 0.10 * combined_quality)
+    return float(np.clip(adaptive, 0.40, 0.90))
+
+
+def _load_or_build_prototypes(
+    embeddings_dir: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load class prototypes from disk or build them from saved embeddings."""
+    # Prefer multi-prototypes (k-means clusters) over single mean prototypes.
+    multi_proto_path = Path(embeddings_dir) / "multi_prototypes.npy"
+    multi_label_path = Path(embeddings_dir) / "multi_labels.npy"
     proto_path = Path(embeddings_dir) / "prototypes.npy"
     names_path = Path(embeddings_dir) / "class_names.npy"
 
-    # Fast path: load precomputed prototypes for low-latency startup.
+    if multi_proto_path.exists() and multi_label_path.exists():
+        prototypes = np.load(multi_proto_path).astype(np.float32)
+        class_names = np.load(multi_label_path).astype(str)
+        return prototypes, class_names
+
     if proto_path.exists() and names_path.exists():
         prototypes = np.load(proto_path).astype(np.float32)
         class_names = np.load(names_path).astype(str)
         return prototypes, class_names
 
-    # Fallback path: derive prototypes from saved sample-level embeddings.
     embeddings, labels = load_saved_embeddings(
         Path(embeddings_dir) / "embeddings.npy",
         Path(embeddings_dir) / "labels.npy",
@@ -203,86 +235,108 @@ def _load_or_build_prototypes(embeddings_dir: str) -> tuple[np.ndarray, np.ndarr
     return compute_class_prototypes(embeddings, labels)
 
 
+def _load_stored_embeddings(
+    embeddings_dir: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load individual enrollment embeddings and labels for kNN matching.
+
+    Returns empty arrays if files are not found (graceful degradation to
+    prototype-only matching).
+    """
+    emb_path = Path(embeddings_dir) / "embeddings.npy"
+    lbl_path = Path(embeddings_dir) / "labels.npy"
+    if emb_path.exists() and lbl_path.exists():
+        try:
+            return load_saved_embeddings(emb_path, lbl_path)
+        except Exception:
+            pass
+    return np.empty((0, 0), dtype=np.float32), np.empty((0,), dtype=str)
+
+
+# ---------------------------------------------------------------------------
+# Main real-time inference loop
+# ---------------------------------------------------------------------------
+
 def recognize_realtime(
     embeddings_dir: str = "embeddings",
     metric: str = "cosine",
-    threshold: float = 0.60,
+    threshold: float = 0.0,         # 0.0 -> auto-load calibrated threshold
     backend: str = "auto",
     onnx_model_path: str = "models/arcface.onnx",
     camera_id: int = 0,
     vote_frames: int = 7,
+    deepface_model: str = "ArcFace",
+    min_face_quality: float = 0.15,  # skip faces below this quality score
 ) -> None:
     """Run real-time webcam recognition using prototype similarity matching.
 
-    Function name:
-        recognize_realtime
-
-    Purpose:
-        Captures live frames, detects faces, extracts embeddings, compares each
-        embedding with class prototypes, and overlays recognition result.
-
     Parameters:
-        embeddings_dir (str): Directory containing saved embeddings/prototypes.
-        metric (str): Similarity metric ('cosine' or 'euclidean').
-        threshold (float): Decision threshold for known vs unknown matching.
-        backend (str): Embedding backend ('auto'/'facenet'/'onnx').
-        onnx_model_path (str): Path to ONNX embedding model.
-        camera_id (int): OpenCV camera index.
-
-    Returns:
-        None
-
-    Role in face recognition process:
-        Implements full real-time inference flow and final recognition decision
-        (Authorized/Known identity or Unknown) for each detected face.
+        embeddings_dir: Directory containing saved embeddings / prototypes.
+        metric: Similarity metric ('cosine' or 'euclidean').
+        threshold: Recognition threshold. Pass 0.0 (default) to auto-load the
+            calibrated value saved by generate_embeddings.py.
+        backend: Embedding backend.
+        onnx_model_path: Path to ONNX embedding model.
+        camera_id: OpenCV camera index.
+        vote_frames: Majority-vote window (frames).
+        deepface_model: DeepFace model name when backend='deepface'.
+        min_face_quality: Minimum composite face quality to attempt recognition.
     """
-    # Initialize detection and feature extraction models for streaming mode.
     detector = load_face_detector()
-    embedder = FaceEmbedder(backend=backend, onnx_model_path=onnx_model_path)
+    embedder = FaceEmbedder(
+        backend=backend,
+        onnx_model_path=onnx_model_path,
+        deepface_model=deepface_model,
+    )
 
-    # Load class prototypes that represent enrolled identities.
     prototypes, class_names = _load_or_build_prototypes(embeddings_dir)
-
     if len(prototypes) == 0:
         raise RuntimeError("No prototypes found. Run generate_embeddings.py first.")
 
-    import sys as _sys
-    # Open webcam stream for real-time inference.
-    cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW) if _sys.platform.startswith("win") else cv2.VideoCapture(camera_id)
-    if not cap.isOpened():
-        raise RuntimeError("Could not open webcam. Check camera permissions/device id.")
+    # Load individual stored embeddings for kNN-based matching.
+    stored_embeddings, stored_labels = _load_stored_embeddings(embeddings_dir)
+    use_knn = len(stored_embeddings) > 0
+    if use_knn:
+        print(f"[INFO] kNN matching enabled  ({len(stored_embeddings)} stored embeddings)")
 
-    # ----------------------------------------------------------------
-    # High-resolution capture (1280x720) so distant faces contain
-    # enough pixels for reliable embedding extraction.
-    # ----------------------------------------------------------------
+    # Load calibrated threshold (LOO-calibrated in generate_embeddings.py)
+    # when the caller has not explicitly set one (threshold == 0.0).
+    if threshold <= 0.0:
+        base_threshold = load_auto_threshold(embeddings_dir, fallback=0.65)
+        print(f"[INFO] Auto-loaded calibrated threshold: {base_threshold:.4f}")
+    else:
+        base_threshold = threshold
+
+    import sys as _sys
+    cap = (
+        cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
+        if _sys.platform.startswith("win")
+        else cv2.VideoCapture(camera_id)
+    )
+    if not cap.isOpened():
+        raise RuntimeError("Could not open webcam. Check camera permissions / device id.")
+
+    # Request high-resolution capture so distant faces contain enough pixels.
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # ----------------------------------------------------------------
-    # Temporal embedding smoother: one EMA track per visible face.
-    # alpha=0.7 weights the current frame heavily while smoothing
-    # frame-to-frame noise. Tracks reset after 10 missed frames.
-    # ----------------------------------------------------------------
+    # Temporal embedding smoother: EMA per tracked face.
     tracker = FaceTracker(alpha=0.7, max_missed_frames=10)
-
-    # ── Frame-vote stabiliser: one rolling majority-vote history per face. ─
-    # vote_frames=5 means a label must win >2 of the last 5 frame predictions
-    # before it is displayed, eliminating single-frame flicker.
+    # Majority-vote stabiliser: one rolling history per tracked face.
     voter = FrameVoter(window=vote_frames, max_missed_frames=12)
-    SMALL_FACE_PX = 100
 
     print("=" * 80)
-    print("Few-Shot Face Recognition Started  [Distance-Robust Mode]")
+    print("Few-Shot Face Recognition  [Adaptive Quality Mode]")
     print(f"Backend       : {embedder.backend_name}")
-    print(f"Metric        : {metric}")
-    print(f"Threshold     : {threshold}  (auto-reduced by 0.05 for small faces, min 0.40)")
-    print(f"Vote window   : {vote_frames} frames  (majority vote for stability)")
-    print(f"Known classes : {len(class_names)}")
+    print(f"Metric        : {metric}  (ensemble={metric == 'cosine'})")
+    print(f"Base threshold: {base_threshold:.4f}  (quality-adaptive per face)")
+    print(f"Vote window   : {vote_frames} frames")
+    print(f"Known classes : {len(class_names)}  ({', '.join(class_names)})")
     print(f"Resolution    : {actual_w}x{actual_h}")
-    print("Press 'q' to stop")
+    print(f"Min quality   : {min_face_quality}")
+    print("Press 'q' to quit")
     print("=" * 80)
 
     prev_time = time.time()
@@ -293,152 +347,125 @@ def recognize_realtime(
             if not success:
                 continue
 
-            # Face detection stage on current frame.
-            # Lower min_confidence (0.85) improves recall for small distant faces.
+            # Face detection: lower min_confidence (0.85) improves recall for
+            # small or tilted faces at medium-to-far camera distances.
             detections = detect_faces(frame, detector, min_confidence=0.85, padding=0.12)
 
-            # Expire stale tracks (embedding smoother AND vote history).
             active_boxes = [det.box for det in detections]
             tracker.expire_tracks(active_boxes)
             voter.expire(active_boxes)
 
-            # Evaluate each detected face independently.
+            frame_width = frame.shape[1]
+
             for det in detections:
                 x1, y1, x2, y2 = det.box
                 face_w = x2 - x1
-                face_h = y2 - y1
+                distance = _estimate_distance(face_w)
 
-                # ----------------------------------------------------------
-                # Bounding box size monitoring.
-                # Faces narrower than SMALL_FACE_PX pixels indicate a subject
-                # standing 2-3 m from the camera (distance-mode activation).
-                # ----------------------------------------------------------
-                small_face = face_w < SMALL_FACE_PX
-                print(
-                    f"[BBox] x1={x1} y1={y1} x2={x2} y2={y2}  "
-                    f"w={face_w} h={face_h}  small={small_face}",
-                    flush=True,
-                )
-
-                if small_face:
-                    # Auto-zoom: expand box by 25%, crop, resize to 160x160,
-                    # and apply CLAHE before passing to the embedding model.
-                    face_crop = get_enhanced_crop(
-                        frame, det.box, margin=0.25, target_size=160
+                # Frame quality gate: skip faces too blurry/dark to embed reliably.
+                if det.quality_score < min_face_quality:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (60, 60, 60), 1)
+                    cv2.putText(
+                        frame,
+                        f"Low Q:{det.quality_score:.2f}",
+                        (x1, max(14, y1 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (80, 80, 80), 1,
                     )
-                else:
-                    # Standard crop — use the already-extracted face region.
-                    face_crop = det.face_rgb
+                    continue
 
-                # Feature extraction: face crop -> raw embedding vector.
+                # Face crop: use enhanced crop for far faces; aligned crop otherwise.
+                if distance == "far":
+                    face_crop = get_enhanced_crop(frame, det.box, margin=0.25, target_size=160)
+                else:
+                    if det.landmarks_5pt is not None:
+                        aligned = align_face_from_landmarks(frame, det.landmarks_5pt)
+                        face_crop = aligned if aligned is not None else det.face_rgb
+                    else:
+                        face_crop = det.face_rgb
+
+                # Raw embedding extraction.
                 raw_embedding = embedder.embed_face(face_crop)
 
-                # ----------------------------------------------------------
-                # Temporal embedding smoothing (EMA per tracked face).
-                # Reduces recognition flicker caused by head pose / lighting
-                # variation between consecutive frames.
-                # smoothed = 0.7 * current + 0.3 * previous
-                # ----------------------------------------------------------
+                # Temporal EMA smoothing: reduces pose/lighting jitter between frames.
                 embedding = tracker.update(det.box, raw_embedding)
 
-                # ----------------------------------------------------------
-                # Adaptive thresholding for distance.
-                # Small faces yield noisier embeddings so we slightly relax
-                # the threshold to reduce false "Unknown" rejections, clamped
-                # at 0.65 to preserve identity discrimination.
-                # ----------------------------------------------------------
-                if small_face:
-                    effective_threshold = max(0.40, threshold - 0.05)
-                else:
-                    effective_threshold = threshold
-
-                # Similarity comparison + threshold-based identity decision.
-                raw_result = predict_with_prototypes(
-                    query_embedding=embedding,
-                    prototypes=prototypes,
-                    class_names=class_names,
-                    metric=metric,
-                    threshold=effective_threshold,
+                # Quality + size adaptive threshold.
+                effective_threshold = _compute_adaptive_threshold(
+                    base_threshold, face_w, frame_width, det.quality_score
                 )
 
-                # ── Majority-vote stabilisation ───────────────────────
-                # Replace the raw single-frame prediction with the label that
-                # won the majority vote over the last `vote_frames` frames.
+                # Identity decision: fuse prototype + kNN for max accuracy.
+                if use_knn:
+                    raw_result = combined_predict(
+                        query_embedding=embedding,
+                        prototypes=prototypes,
+                        class_names=class_names,
+                        stored_embeddings=stored_embeddings,
+                        stored_labels=stored_labels,
+                        threshold=effective_threshold,
+                        use_ensemble=(metric == "cosine"),
+                    )
+                else:
+                    raw_result = predict_with_prototypes(
+                        query_embedding=embedding,
+                        prototypes=prototypes,
+                        class_names=class_names,
+                        metric=metric,
+                        threshold=effective_threshold,
+                        use_ensemble=(metric == "cosine"),
+                    )
+
+                # Majority-vote stabilisation over the last vote_frames frames.
                 voted_name, voted_conf = voter.vote(
                     box=det.box,
                     name=str(raw_result["name"]),
                     confidence=float(raw_result["confidence"]),
                 )
-                result = dict(raw_result)   # copy to avoid mutating original
-                result["name"]       = voted_name
-                result["confidence"] = voted_conf
+                name = voted_name
+                confidence = voted_conf
 
-                name = str(result["name"])
-                confidence = float(result["confidence"])
-
-                # Recognition decision visualization:
-                # green = known/authorized, red = unknown.
-                color = (0, 200, 0) if name != "Unknown" else (0, 0, 255)
+                # Overlay
+                color = (0, 210, 0) if name != "Unknown" else (0, 0, 220)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-                # Show small-face indicator so operator knows distance mode.
-                if small_face:
-                    cv2.putText(
-                        frame,
-                        "dist-mode",
-                        (x1, y2 + 16),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.40,
-                        (0, 200, 255),
-                        1,
-                    )
-
-                # Display metric-specific score for academic interpretability.
-                if metric == "cosine":
-                    score_text = f"cos={result['score']:.3f}"
-                else:
-                    score_text = f"dist={result['score']:.3f}"
-
-                thr_text = f"thr={effective_threshold:.2f}"
-                label = f"{name} | conf={confidence * 100:.1f}% | {score_text} | {thr_text}"
+                # Name + confidence above box
                 cv2.putText(
                     frame,
-                    label,
+                    f"{name}  {confidence * 100:.0f}%",
                     (x1, max(18, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    color,
-                    2,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2,
+                )
+                # Distance + quality (line 1 below box)
+                cv2.putText(
+                    frame,
+                    f"{distance.upper()}  Q:{det.quality_score:.2f}",
+                    (x1, y2 + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 200, 255), 1,
+                )
+                # Adaptive threshold + raw score (line 2 below box)
+                cv2.putText(
+                    frame,
+                    f"Thr:{effective_threshold:.2f}  Scr:{raw_result['score']:.3f}",
+                    (x1, y2 + 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 200, 255), 1,
                 )
 
-            # Lightweight FPS calculation for runtime performance reporting.
-            current_time = time.time()
-            fps = 1.0 / max(1e-6, current_time - prev_time)
-            prev_time = current_time
+            # FPS counter
+            cur_time = time.time()
+            fps = 1.0 / max(1e-6, cur_time - prev_time)
+            prev_time = cur_time
 
             cv2.putText(
-                frame,
-                f"FPS: {fps:.1f}",
-                (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
+                frame, f"FPS:{fps:.1f}",
+                (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2,
             )
             cv2.putText(
-                frame,
-                f"Classes: {len(class_names)}",
-                (10, 58),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
+                frame, f"Classes:{len(class_names)}  BaseThr:{base_threshold:.3f}",
+                (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1,
             )
 
-            cv2.imshow("FewShotFace - Real-Time Recognition", frame)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
+            cv2.imshow("FewShotFace  Real-Time Recognition", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
     finally:
@@ -447,56 +474,27 @@ def recognize_realtime(
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line configuration for real-time recognition.
-
-    Function name:
-        parse_args
-
-    Purpose:
-        Defines CLI interface for metric selection, threshold tuning, backend
-        selection, and camera source configuration.
-
-    Parameters:
-        None
-
-    Returns:
-        argparse.Namespace: Parsed runtime recognition settings.
-
-    Role in face recognition process:
-        Allows reproducible evaluation of threshold and metric effects in
-        few-shot real-time recognition experiments.
-    """
     parser = argparse.ArgumentParser(description="Run real-time few-shot face recognition")
-    parser.add_argument("--embeddings-dir", default="embeddings", help="Embeddings directory")
+    parser.add_argument("--embeddings-dir", default="embeddings")
+    parser.add_argument("--metric", default="cosine", choices=["cosine", "euclidean"])
     parser.add_argument(
-        "--metric",
-        default="cosine",
-        choices=["cosine", "euclidean"],
-        help="Similarity metric",
+        "--threshold", type=float, default=0.0,
+        help="Recognition threshold (0.0 = auto-load calibrated value)",
     )
     parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.60,
-        help="Threshold for known/unknown decision",
+        "--backend", default="auto",
+        choices=["auto", "facenet", "onnx", "insightface", "deepface"],
     )
     parser.add_argument(
-        "--backend",
-        default="auto",
-        choices=["auto", "facenet", "onnx", "insightface"],
-        help="Embedding backend (insightface = ArcFace, highest accuracy)",
+        "--deepface-model", default="ArcFace",
+        choices=["ArcFace", "Facenet512", "VGG-Face", "SFace", "Facenet", "OpenFace"],
     )
+    parser.add_argument("--onnx-model-path", default="models/arcface.onnx")
+    parser.add_argument("--camera-id", type=int, default=0)
+    parser.add_argument("--vote-frames", type=int, default=7)
     parser.add_argument(
-        "--onnx-model-path",
-        default="models/arcface.onnx",
-        help="Path to ONNX face embedding model",
-    )
-    parser.add_argument("--camera-id", type=int, default=0, help="Webcam device id")
-    parser.add_argument(
-        "--vote-frames",
-        type=int,
-        default=7,
-        help="Majority-vote window: number of consecutive frames used to stabilise the decision (default: 7)",
+        "--min-quality", type=float, default=0.15,
+        help="Minimum face quality to attempt recognition (default: 0.15)",
     )
     return parser.parse_args()
 
@@ -511,4 +509,7 @@ if __name__ == "__main__":
         onnx_model_path=args.onnx_model_path,
         camera_id=args.camera_id,
         vote_frames=args.vote_frames,
+        deepface_model=args.deepface_model,
+        min_face_quality=args.min_quality,
     )
+

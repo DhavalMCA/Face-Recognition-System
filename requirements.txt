@@ -1,4 +1,3 @@
-flask
 opencv-python<4.13
 numpy<2
 torch
@@ -8,9 +7,7 @@ onnxruntime
 insightface @ https://huggingface.co/hanamizuki-ai/insightface-releases/resolve/main/insightface-0.7.3-cp312-cp312-win_amd64.whl
 scikit-learn
 mtcnn
-fastapi
-uvicorn
 pillow
-jinja2
 PyQt5
 prettytable
+deepface
