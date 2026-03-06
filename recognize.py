@@ -416,10 +416,13 @@ def recognize_realtime(
                     )
 
                 # Majority-vote stabilisation over the last vote_frames frames.
+                confidence_val = raw_result.get("confidence", 0.0)
+                if not isinstance(confidence_val, (int, float, np.number)):
+                    confidence_val = 0.0
                 voted_name, voted_conf = voter.vote(
                     box=det.box,
                     name=str(raw_result["name"]),
-                    confidence=float(raw_result["confidence"]),
+                    confidence=float(confidence_val),
                 )
                 name = voted_name
                 confidence = voted_conf
