@@ -102,6 +102,19 @@ python recognize.py --backend auto --threshold 0.80
 - Vote frames: `5-7`
 - Camera resolution for recognition: `1280x720` when possible
 
+### Why Threshold and Vote Frames Matter
+
+- Threshold controls acceptance strictness:
+  - Higher threshold (`0.82` to `0.86`) reduces false positives but may label known faces as `Unknown` more often.
+  - Lower threshold (`0.76` to `0.80`) recognizes known users more easily but can increase mistaken matches.
+- Frame voting (`FrameVoter`) stabilizes labels across consecutive frames:
+  - A single frame can be noisy (motion blur, partial face, lighting flicker).
+  - Voting over the last `5-7` frames prevents rapid label flipping and gives smoother live output.
+- Practical tuning rule:
+  - If you see wrong identity matches, increase threshold first.
+  - If labels flicker between a name and `Unknown`, increase vote frames slightly.
+  - If recognition feels slow to update after a person enters/leaves, reduce vote frames slightly.
+
 ## 7. Common Commands
 
 ### Register
