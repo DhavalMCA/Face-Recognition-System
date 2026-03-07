@@ -293,6 +293,21 @@ def recognize_realtime(
     if len(prototypes) == 0:
         raise RuntimeError("No prototypes found. Run generate_embeddings.py first.")
 
+    # Dimension-mismatch guard: probe the embedder with a dummy image so we can
+    # compare its output dimension against the stored prototype dimension before
+    # entering the camera loop.  A mismatch (e.g. ViT 768-d vs ArcFace 512-d
+    # prototypes) would silently produce garbage scores or a numpy crash.
+    _probe = np.zeros((112, 112, 3), dtype=np.uint8)
+    _probe_dim = embedder.embed_face(_probe).shape[0]
+    _proto_dim = prototypes.shape[1]
+    if _probe_dim != _proto_dim:
+        raise RuntimeError(
+            f"Embedding dimension mismatch: the '{backend}' backend produces "
+            f"{_probe_dim}-d vectors but the stored prototypes are {_proto_dim}-d.\n"
+            f"Fix: rebuild embeddings with the same backend you use here:\n"
+            f"  python generate_embeddings.py --backend {backend}"
+        )
+
     # Load individual stored embeddings for kNN-based matching.
     stored_embeddings, stored_labels = _load_stored_embeddings(embeddings_dir)
     use_knn = len(stored_embeddings) > 0

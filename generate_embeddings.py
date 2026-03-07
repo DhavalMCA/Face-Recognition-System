@@ -226,6 +226,8 @@ def generate_embeddings(
         "n_classes": int(len(class_names)),
         "n_samples": int(len(embeddings_array)),
         "tta_views": int(n_tta) if use_tta else 1,
+        "embed_dim": int(embeddings_array.shape[1]),
+        "backend": embedder.backend_name,
     }
     thr_path.write_text(json.dumps(thr_data, indent=2))
 
@@ -246,7 +248,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embeddings-dir", default="embeddings")
     parser.add_argument(
         "--backend", default="auto",
-        choices=["auto", "facenet", "onnx", "insightface", "deepface"],
+        choices=["auto", "facenet", "onnx", "insightface", "deepface", "vit"],
     )
     parser.add_argument(
         "--deepface-model", default="ArcFace",

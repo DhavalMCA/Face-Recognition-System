@@ -787,8 +787,19 @@ class ViTEmbedder:
 
     def __init__(self) -> None:
         """Load ViT-B/16 and strip the classification head."""
+        import warnings
         import torch
         from torchvision.models import vit_b_16, ViT_B_16_Weights
+
+        warnings.warn(
+            "ViT backend selected: ViT-B/16 is ImageNet-pretrained for object "
+            "classification, NOT for face identity recognition. It will produce "
+            "poor face recognition accuracy. Use 'insightface', 'onnx', or "
+            "'facenet' backend for reliable face recognition. ViT is intended "
+            "for research/benchmarking only.",
+            UserWarning,
+            stacklevel=3,
+        )
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         model = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
