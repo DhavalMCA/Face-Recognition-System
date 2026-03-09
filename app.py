@@ -33,7 +33,9 @@ from recognize import FrameVoter
 from evaluate_accuracy import (
     evaluate as run_accuracy_evaluation,
     load_prototypes as load_accuracy_prototypes,
-    print_comparison_table, print_per_identity_table, print_threshold_recommendation
+    print_comparison_table, print_per_identity_table, print_threshold_recommendation,
+    _metrics_from_results, evaluate_backend, build_in_memory_prototypes,
+    precompute_face_crops, COMPARISON_BACKENDS, _comparison_resolved_name,
 )
 
 app = Flask(__name__)
@@ -504,10 +506,14 @@ def evaluate():
         detector = load_face_detector()
         embedder = FaceEmbedder(backend=backend, onnx_model_path=ONNX_MODEL_PATH, deepface_model=df_model)
 
+        # Pre-detect all face crops once — shared across every backend.
+        face_cache = precompute_face_crops(Path(DATASET_DIR), detector)
+
         t0 = time.perf_counter()
         results, total, no_face = run_accuracy_evaluation(
             dataset_dir=Path(DATASET_DIR), prototypes=prototypes, class_names=class_names,
-            detector=detector, embedder=embedder, threshold=cfg.threshold, metric=SIMILARITY_METRIC, quiet=True
+            detector=detector, embedder=embedder, threshold=cfg.threshold,
+            metric=SIMILARITY_METRIC, quiet=True, face_cache=face_cache,
         )
         elapsed = time.perf_counter() - t0
 
@@ -524,8 +530,22 @@ def evaluate():
             print(f"Evaluation time  : {elapsed:.2f}s\n")
             print("Per-Identity Metrics")
             print_per_identity_table(results)
-            print("\nComparison Table")
-            print_comparison_table(results, cfg.threshold, embedder.backend_name)
+            print("\nEvaluating all comparison backends (face crops pre-cached)...")
+            all_model_metrics = {embedder.backend_name: _metrics_from_results(results)}
+            for lbl, bk, df_m, if_m in COMPARISON_BACKENDS:
+                if _comparison_resolved_name(bk, df_m, if_m) == embedder.backend_name:
+                    continue
+                m = evaluate_backend(
+                    label=lbl, backend=bk,
+                    deepface_model=df_m, insightface_model=if_m,
+                    dataset_dir=Path(DATASET_DIR), detector=detector,
+                    threshold=cfg.threshold, metric=SIMILARITY_METRIC,
+                    quiet=True, face_cache=face_cache,
+                )
+                if m is not None:
+                    all_model_metrics[lbl] = m
+            print("\nUnified Model Comparison")
+            print_comparison_table(all_model_metrics, embedder.backend_name)
             print_threshold_recommendation(results, cfg.threshold)
 
         return jsonify({"report": report.getvalue().strip()})

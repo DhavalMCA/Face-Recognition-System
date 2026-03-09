@@ -56,6 +56,12 @@ from evaluate_accuracy import (
     print_comparison_table,
     print_per_identity_table,
     print_threshold_recommendation,
+    _metrics_from_results,
+    evaluate_backend,
+    build_in_memory_prototypes,
+    precompute_face_crops,
+    COMPARISON_BACKENDS,
+    _comparison_resolved_name,
 )
 
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal, pyqtSlot, QSize
@@ -680,6 +686,9 @@ class AccuracyWorker(QThread):
                 deepface_model=df_model,
             )
 
+            # Pre-detect all face crops once — shared across every backend.
+            face_cache = precompute_face_crops(Path(DATASET_DIR), detector)
+
             t0 = time.perf_counter()
             results, total, no_face = run_accuracy_evaluation(
                 dataset_dir=Path(DATASET_DIR),
@@ -690,6 +699,7 @@ class AccuracyWorker(QThread):
                 threshold=getattr(self, "threshold", THRESHOLD),
                 metric=getattr(self, "metric", SIMILARITY_METRIC),
                 quiet=True,
+                face_cache=face_cache,
             )
             elapsed = time.perf_counter() - t0
 
@@ -707,8 +717,22 @@ class AccuracyWorker(QThread):
                 print()
                 print("Per-Identity Metrics")
                 print_per_identity_table(results)
-                print("\nComparison Table")
-                print_comparison_table(results, self.threshold, embedder.backend_name)
+                print("\nEvaluating all comparison backends (face crops pre-cached)...")
+                all_model_metrics = {embedder.backend_name: _metrics_from_results(results)}
+                for lbl, bk, df_m, if_m in COMPARISON_BACKENDS:
+                    if _comparison_resolved_name(bk, df_m, if_m) == embedder.backend_name:
+                        continue
+                    m = evaluate_backend(
+                        label=lbl, backend=bk,
+                        deepface_model=df_m, insightface_model=if_m,
+                        dataset_dir=Path(DATASET_DIR), detector=detector,
+                        threshold=self.threshold, metric=self.metric,
+                        quiet=True, face_cache=face_cache,
+                    )
+                    if m is not None:
+                        all_model_metrics[lbl] = m
+                print("\nUnified Model Comparison")
+                print_comparison_table(all_model_metrics, embedder.backend_name)
                 print_threshold_recommendation(results, self.threshold)
 
             self.finished_signal.emit(report.getvalue().strip())
