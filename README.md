@@ -1,20 +1,222 @@
-# FewShotFace - Real-Time Few-Shot Face Recognition
+# FewShotFace — Real-Time Few-Shot Face Recognition
 
-Client-ready face recognition system with three ways to operate:
-- Web Application (`app.py`) - New modern interface!
-- Desktop app (`gui.py`)
-- Command line scripts
+A production-ready face recognition system that works with as few as 8–15 images per person — no model retraining required.
 
-The system is optimized for low-data onboarding (few-shot): you can register a person with 8-15 images and start recognition without retraining a deep model.
+Three ways to operate:
+- **Web Application** (`app.py`) — modern browser UI (recommended)
+- **Desktop App** (`gui.py`) — PyQt5 standalone app
+- **Command-Line** — full pipeline via individual scripts
+
+---
 
 ## 1. What This Project Delivers
 
-- Fast onboarding of new users
-- Real-time webcam recognition
-- Better stability with frame voting (reduced label flicker)
-- Better distance handling (small-face enhancement)
-- Better robustness in uneven lighting (CLAHE normalization)
-- Evaluation scripts for measurable accuracy reporting
+| Feature | Detail |
+|---|---|
+| Few-shot onboarding | Register a new person with 8–15 images |
+| Real-time webcam recognition | Stable labels with frame voting |
+| Multi-backend comparison | InsightFace, FaceNet, ONNX, DeepFace evaluated live |
+| **Single-pass face detection** | MTCNN runs once; all backends share the cached crops |
+| **Parallel backend evaluation** | `ThreadPoolExecutor` runs all comparison models concurrently |
+| Accuracy reporting | Per-identity table + unified model comparison table |
+| Threshold sweep | Sweep 0.60–0.90 and pick the optimal operating point |
+| Mobile photo normalization | White-balance / CLAHE correction for mixed datasets |
+
+---
+
+## 2. Recommended Workflow
+
+```
+1. Enroll users           register.py  or  GUI Step 1
+2. (Optional) normalise   fix_mobile_photos.py
+3. Build embeddings        generate_embeddings.py  or  GUI Step 2
+4. Live recognition        recognize.py  or  GUI Step 3
+5. Evaluate accuracy       evaluate_accuracy.py
+```
+
+See `END_TO_END_WORKING.md` for full technical detail at each stage.
+
+---
+
+## 3. Quick Start (Windows)
+
+### 3.1 Create and activate environment
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 3.2 Launch Web Application (recommended)
+
+```powershell
+python app.py
+```
+
+Open `http://127.0.0.1:5000` in your browser.
+
+### 3.3 Launch Desktop GUI
+
+```powershell
+python gui.py
+```
+
+---
+
+## 4. Operator Guide
+
+### Step 1 — Enroll Person
+
+- Enter name → capture 8–15 images
+- Cover front, left tilt, right tilt, near/medium/far distances
+
+### Step 2 — Build Embeddings
+
+```powershell
+python generate_embeddings.py --backend auto
+```
+
+### Step 3 — Start Recognition
+
+```powershell
+python recognize.py --backend auto --threshold 0.80 --camera-id 0
+```
+
+Recommended threshold range: `0.78`–`0.82` for balanced behaviour.
+
+---
+
+## 5. Accuracy Evaluation
+
+### Single threshold
+
+```powershell
+python evaluate_accuracy.py --backend auto --threshold 0.80
+```
+
+### Sweep multiple thresholds
+
+```powershell
+python evaluate_accuracy.py --backend auto --sweep
+```
+
+### What the output looks like
+
+```
+  ╔══════════════════════════════════════════════════════════════════════════╗
+  ║  #    Model                  Accuracy  Precision    Recall  Specificity       F1
+  ╠══════════════════════════════════════════════════════════════════════════╣
+  ║     1  insightface(buffalo_l)   97.50%     97.50%   95.00%       98.75%   96.20%  ◄
+  ║     2  FaceNet                  94.17%     95.83%   88.89%       97.22%   92.22%
+  ║     3  ONNX (w600k_r50)         92.50%     91.67%   85.00%       96.67%   88.18%
+  ╚══════════════════════════════════════════════════════════════════════════╝
+
+  Primary model : insightface(buffalo_l)  │  Accuracy: 97.50%  │  Rank: #1 of 8
+```
+
+**Speed optimisations applied:**
+- MTCNN face detection runs **once** via `precompute_face_crops()` — result shared across all backends
+- All comparison backends run **in parallel** via `ThreadPoolExecutor(max_workers=4)`
+- Net result: evaluation of 8 models is roughly as fast as evaluating 2 sequentially
+
+---
+
+## 6. Suggested Default Settings
+
+| Setting | Value |
+|---|---|
+| Enrollment images / person | 10–15 |
+| Recognition threshold | 0.80 |
+| Vote frames | 5–7 |
+| Camera resolution | 1280×720 |
+
+### Threshold tuning
+
+| Range | Effect |
+|---|---|
+| 0.82–0.86 | High-security — fewer false positives, may miss some genuine users |
+| 0.78–0.82 | Balanced — good accuracy, low false alarms |
+| 0.74–0.78 | Lenient — maximises recall, more false positives |
+
+---
+
+## 7. Common Commands
+
+```powershell
+# Enroll
+python register.py --name "Dhaval" --num-images 12 --camera-id 0
+
+# Normalize mobile photos (optional)
+python fix_mobile_photos.py
+
+# Build embeddings
+python generate_embeddings.py --backend auto
+
+# Recognize
+python recognize.py --backend auto --threshold 0.80 --camera-id 0
+
+# Evaluate (all backends + threshold sweep)
+python evaluate_accuracy.py --backend auto --sweep
+```
+
+---
+
+## 8. Project Structure
+
+```
+FewShotFace/
+├── app.py                   Flask web server + REST API
+├── gui.py                   PyQt5 desktop application
+├── register.py              Face enrollment (webcam capture)
+├── generate_embeddings.py   Build embeddings and prototypes
+├── recognize.py             Live webcam recognition
+├── evaluate_accuracy.py     Accuracy evaluation + multi-model comparison
+├── fix_mobile_photos.py     Mobile photo normalisation
+├── utils.py                 FaceEmbedder, detection helpers, prototypes
+├── similarity.py            Cosine/Euclidean similarity + prediction logic
+├── templates/index.html     Web UI layout
+├── static/                  CSS and JS for web UI
+├── dataset/                 Per-identity image folders
+├── embeddings/              Generated .npy files and prototypes
+├── models/                  ONNX model files (w600k_r50.onnx used by default)
+├── README.md
+├── COMPONENTS.md
+├── INSTALLATION.md
+└── END_TO_END_WORKING.md
+```
+
+---
+
+## 9. Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Import errors in VS Code | Set interpreter to `.venv\Scripts\python.exe` |
+| Webcam not opening | Close other camera apps; try `--camera-id 1` |
+| Frequent *Unknown* labels | Add more images; lower threshold to `0.78`; rebuild embeddings |
+| False positives | Raise threshold to `0.82`–`0.86`; enroll lookalike family members |
+| Missing prototype error | Run Step 2 (`generate_embeddings.py`) again |
+| `INVALID_PROTOBUF` for arcface.onnx | Fixed — app now uses `models/w600k_r50.onnx` automatically |
+| Evaluation takes too long | Already optimised: detection runs once, backends run in parallel |
+
+---
+
+## 10. Delivery Checklist (Before Demo)
+
+1. Verify all required identities are enrolled
+2. Regenerate embeddings fresh
+3. Confirm recognition at near and medium distance
+4. Keep threshold at `0.80` as baseline; have `0.78` and `0.82` ready
+5. Run `evaluate_accuracy.py --sweep` and save report screenshot
+
+---
+
+## 11. License
+
+See `LICENSE`.
+
 
 ## 2. Recommended Client Workflow
 

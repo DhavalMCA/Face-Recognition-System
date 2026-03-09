@@ -1,18 +1,161 @@
 # Components Guide
 
-This version of FewShotFace includes desktop and CLI components only.
+FewShotFace supports three operation modes: Web App (`app.py`), Desktop GUI (`gui.py`), and CLI scripts.
+
+---
 
 ## 1. Architecture Overview
 
-```text
-Web App (app.py), Desktop GUI (gui.py), and CLI scripts
-            |
-            v
-      Core ML pipeline
-            |
-            v
-   register -> embeddings -> recognize -> evaluate
 ```
+Web App (app.py)  ─┐
+Desktop GUI (gui.py) ─┤─▶  Core ML pipeline
+CLI scripts        ─┘        │
+                             ▼
+              register → embeddings → recognize → evaluate
+```
+
+---
+
+## 2. Application Entry Points
+
+### `app.py` — Flask Web Server
+
+Purpose: Modern browser-based operator interface.
+
+Key responsibilities:
+- Step 1 enrollment (webcam capture via browser)
+- Step 2 embedding generation
+- Step 3 live recognition stream
+- `/api/evaluate` — runs full multi-backend evaluation
+
+Evaluation route behaviour:
+- Calls `precompute_face_crops()` once → shared crop cache
+- Runs primary backend evaluation with cached crops
+- Evaluates all `COMPARISON_BACKENDS` sequentially, each using the same cache
+- Returns unified comparison table + threshold recommendation
+
+### `gui.py` — PyQt5 Desktop Application
+
+Purpose: Standalone desktop operator interface.
+
+Key responsibilities:
+- Step 1 enrollment, Step 2 training, Step 3 live recognition
+- `AccuracyWorker(QThread)` — background thread for evaluation
+
+`AccuracyWorker.run()` evaluation flow:
+1. `load_face_detector()` — MTCNN loaded once
+2. `precompute_face_crops()` — all face crops cached in memory
+3. `build_in_memory_prototypes()` — primary model protos built from cache
+4. `run_accuracy_evaluation()` — primary evaluation using cache
+5. Sequential loop over `COMPARISON_BACKENDS`, each `evaluate_backend()` call uses cache
+6. `print_comparison_table()` — unified ranked table printed to report
+
+Worker threads:
+- `EnrollWorker`
+- `TrainWorker`
+- `RecognitionWorker`
+- `AccuracyWorker`
+
+---
+
+## 3. CLI Scripts
+
+### `register.py`
+Captures face samples per identity and stores them under `dataset/<name>/`.
+
+### `generate_embeddings.py`
+Converts all dataset images to embeddings and builds class prototypes.
+
+Output files in `embeddings/`:
+- `embeddings.npy`, `labels.npy`
+- `prototypes.npy`, `class_names.npy`
+- `backend.json`
+
+### `recognize.py`
+Live webcam recognition using prototype matching.
+
+Key runtime steps: detect → embed → match prototype → vote across frames → display.
+
+### `evaluate_accuracy.py`
+
+Accuracy evaluation and multi-backend comparison engine.
+
+Key public API:
+
+| Symbol | Purpose |
+|---|---|
+| `precompute_face_crops(dataset_dir, detector)` | Run MTCNN once; cache all face crops |
+| `embed_image(..., face_cache=None)` | Embed one image; use cache to skip detection |
+| `build_in_memory_prototypes(..., face_cache=None)` | Build prototypes without writing to disk |
+| `evaluate(..., face_cache=None)` | Core one-vs-rest evaluation loop |
+| `evaluate_backend(label, backend, ..., face_cache=None)` | Build protos + evaluate one backend |
+| `_run_backends_parallel(backends, ..., face_cache)` | ThreadPoolExecutor over all comparison backends |
+| `_metrics_from_results(results)` | Macro-average metrics dict from EvalResult list |
+| `print_comparison_table(all_models, primary_label)` | Ranked table with box borders and Specificity column |
+| `print_threshold_recommendation(results, threshold)` | Dynamically padded advisory box |
+| `COMPARISON_BACKENDS` | List of 8 real backends evaluated live on local dataset |
+| `FaceCropCache` | `Dict[str, Optional[np.ndarray]]` — type alias for crop cache |
+
+Comparison backends (evaluated at runtime):
+- InsightFace buffalo_l
+- InsightFace buffalo_sc
+- FaceNet
+- ONNX w600k_r50
+- DeepFace ArcFace
+- DeepFace VGG-Face
+- DeepFace Facenet512
+- DeepFace SFace
+
+### `fix_mobile_photos.py`
+Optional preprocessing: white-balance correction, CLAHE, unsharp mask for mixed-camera datasets.
+
+### `evaluate_models.py`
+Additional model-level comparison output (kept for legacy compatibility).
+
+---
+
+## 4. Core Utility Modules
+
+### `utils.py`
+
+- `FaceEmbedder` — unified multi-backend wrapper (auto / facenet / onnx / insightface / deepface)
+  - Default ONNX model: `models/w600k_r50.onnx` (fallback from the corrupt `arcface.onnx`)
+  - Falls back: insightface → onnx → facenet if a backend is unavailable
+- `detect_faces()` — MTCNN detection with padding and confidence filtering
+- `load_face_detector()` — lazy-loaded MTCNN singleton
+- `get_identity_folders()` — list enrolled identity directories
+- `build_augmented_prototypes()` — mean L2-normalised prototype per class
+
+### `similarity.py`
+
+- `predict_with_prototypes()` — cosine or Euclidean nearest-prototype prediction
+- `cosine_similarity()`, `euclidean_distance()` helpers
+
+---
+
+## 5. Data and Artifacts
+
+| Path | Contents |
+|---|---|
+| `dataset/<name>/` | Raw face images per enrolled identity |
+| `embeddings/prototypes.npy` | Mean per-class embedding (required for recognition) |
+| `embeddings/class_names.npy` | Ordered list of enrolled identities |
+| `embeddings/embeddings.npy` | All individual embeddings (used for rebuild) |
+| `embeddings/backend.json` | Backend used when embeddings were generated |
+| `models/w600k_r50.onnx` | Primary ONNX ArcFace model |
+| `models/det_10g.onnx` | InsightFace detection model |
+
+---
+
+## 6. Run Order
+
+1. `register.py`
+2. `generate_embeddings.py`
+3. `recognize.py`
+4. `evaluate_accuracy.py`
+
+After adding new identities, re-run `generate_embeddings.py` before recognition.
+
 
 ## 2. Main Components
 
