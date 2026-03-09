@@ -1,4 +1,4 @@
-﻿# FewShotFace Client Code Explanation (Detailed)
+# FewShotFace Client Code Explanation (Detailed)
 
 This document is written for client discussions and handover meetings.
 It explains the full codebase in plain language, then gives technical depth where needed.
@@ -9,6 +9,7 @@ FewShotFace is a face recognition system designed for practical onboarding with 
 You can register a person using only a small set of images, generate feature data, and run real-time recognition without retraining a deep model from scratch each time.
 
 Two ways to use it:
+- Web dashboard app: `app.py`
 - Desktop operator app: `gui.py`
 - Command-line scripts: `register.py`, `generate_embeddings.py`, `recognize.py`, `evaluate_accuracy.py`
 
@@ -256,6 +257,11 @@ Client-ready asks:
 - "Tune ensemble balance for lower false positives."
 
 ### 4.4 Desktop application
+
+#### `app.py`
+What it provides:
+- Modern operator-facing web dashboard (`templates/index.html`).
+- Backend asynchronous handling identical to the Desktop GUI with polling UI updates.
 
 #### `gui.py`
 What it provides:

@@ -5,7 +5,7 @@ This version of FewShotFace includes desktop and CLI components only.
 ## 1. Architecture Overview
 
 ```text
-Desktop GUI (gui.py) and CLI scripts
+Web App (app.py), Desktop GUI (gui.py), and CLI scripts
             |
             v
       Core ML pipeline
@@ -15,6 +15,20 @@ Desktop GUI (gui.py) and CLI scripts
 ```
 
 ## 2. Main Components
+
+### `app.py`
+
+Purpose:
+- Operator-facing modern Web application (Flask).
+
+Key responsibilities:
+- Step 1 enrollment
+- Step 2 embedding generation
+- Step 3 live recognition
+- Runtime controls (threshold, vote frames, backend)
+
+Worker threads:
+- Handled asynchronously via JavaScript polling and background threads.
 
 ### `gui.py`
 
@@ -116,6 +130,6 @@ Run order should be:
 
 If new users are added, run `generate_embeddings.py` again before recognition.
 
-## 6. Removed Component
+## 6. Added Component
 
-- Web dashboard/API (`app.py`, `templates/`, `static/`) has been removed from this version.
+- **Web dashboard/API**: A modern responsive web interface consisting of `app.py` (Flask Server), `templates/index.html` (layout), `static/css/style.css`, and `static/js/main.js`.

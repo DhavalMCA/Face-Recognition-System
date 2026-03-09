@@ -1,6 +1,7 @@
 # FewShotFace - Real-Time Few-Shot Face Recognition
 
-Client-ready face recognition system with two ways to operate:
+Client-ready face recognition system with three ways to operate:
+- Web Application (`app.py`) - New modern interface!
 - Desktop app (`gui.py`)
 - Command line scripts
 
@@ -38,7 +39,14 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3.2 Launch Desktop GUI (recommended for operators)
+### 3.2 Launch Web Application (Recommended)
+
+```powershell
+python app.py
+```
+Then open your browser and navigate to `http://127.0.0.1:5000`
+
+### 3.3 Launch Desktop GUI
 
 ```powershell
 python gui.py
@@ -152,6 +160,9 @@ python evaluate_models.py
 
 ```text
 FewShotFace/
+|- app.py
+|- templates/
+|- static/
 |- gui.py
 |- register.py
 |- generate_embeddings.py

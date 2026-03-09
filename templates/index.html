@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Face Recognition Monitoring System</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header class="top-header">
+        <div class="logo">
+            <span class="bracket">[</span> <span class="icon">◈</span> <span class="bracket">]</span>
+            <div class="titles">
+                <h1>AI FACE RECOGNITION</h1>
+                <h2>MONITORING SYSTEM v2.0</h2>
+            </div>
+        </div>
+        <div class="header-right">
+            <div id="clock">0000-00-00 00:00:00</div>
+            <div class="active-model-badge">AUTO</div>
+            <div class="pills">
+                <div class="pill" id="pill-model"><span class="dot">◆</span> MODEL</div>
+                <div class="pill" id="pill-camera"><span class="dot">◆</span> CAMERA</div>
+                <div class="pill" id="pill-embeddings"><span class="dot">◆</span> EMBEDDINGS</div>
+                <div class="pill active" id="pill-system"><span class="dot">◆</span> SYSTEM</div>
+            </div>
+        </div>
+    </header>
+
+    <main class="layout-grid">
+        <!-- LEFT COLUMN: Workflow Steps -->
+        <div class="column col-left">
+            <div class="scroll-container">
+                <!-- STEP 1 -->
+                <div class="card step-card">
+                    <div class="card-header">
+                        <span class="step-tag">STEP 01</span>
+                        <div class="title-wrap">
+                            <h3>Enroll New Identity</h3>
+                            <p>Capture face samples for a person</p>
+                        </div>
+                    </div>
+                    <hr>
+                    <div class="field-row">
+                        <label>SUBJECT NAME</label>
+                        <span class="req">● REQUIRED</span>
+                    </div>
+                    <input type="text" id="enroll-name" placeholder="e.g. Dhaval">
+                    <p class="hint">Enter name, then click CAPTURE FACE to begin</p>
+                    <div class="field-row">
+                        <label>SAMPLE COUNT</label>
+                        <input type="number" id="enroll-count" min="2" max="30" value="12">
+                    </div>
+                    <p class="tip-text">Tip: 10–15 images · front, left, right · near, medium (~1.5 m), far (~2-3 m)</p>
+                    <button id="btn-enroll" class="btn btn-cyan">◉ CAPTURE FACE</button>
+                    <div id="enroll-msg" class="sys-msg"></div>
+                </div>
+
+                <!-- STEP 2 -->
+                <div class="card step-card">
+                    <div class="card-header">
+                        <span class="step-tag">STEP 02</span>
+                        <div class="title-wrap">
+                            <h3>Build Recognition Engine</h3>
+                            <p>Generate face embeddings from enrolled data</p>
+                        </div>
+                    </div>
+                    <hr>
+                    <div class="field-row">
+                        <label>TRAINING PROGRESS</label>
+                        <span id="train-pct" class="pct-val">0%</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="train-fill"></div>
+                    </div>
+                    <div id="train-status" class="status-lbl">IDLE — awaiting command</div>
+                    <hr>
+                    <div class="field-row"><label>RECOGNITION MODEL</label></div>
+                    <div class="combo-row">
+                        <select id="backend-sel">
+                            <option value="auto">Auto (best available)</option>
+                            <option value="insightface">InsightFace ArcFace</option>
+                            <option value="facenet">FaceNet InceptionResNet</option>
+                            <option value="onnx">ONNX Custom Model</option>
+                            <option value="deepface">DeepFace Multi-model</option>
+                            <option value="vit">Vision Transformer (ViT-B/16)</option>
+                        </select>
+                        <select id="deepface-sel" style="display:none;">
+                            <option value="ArcFace">ArcFace</option>
+                            <option value="Facenet512">Facenet512</option>
+                            <option value="VGG-Face">VGG-Face</option>
+                            <option value="SFace">SFace</option>
+                            <option value="Facenet">Facenet</option>
+                            <option value="OpenFace">OpenFace</option>
+                        </select>
+                    </div>
+                    <p class="hint-lbl">Auto-detect: InsightFace → ONNX → FaceNet</p>
+                    <button id="btn-train" class="btn btn-cyan">⬡ BUILD EMBEDDINGS</button>
+                    <p class="hint-lbl" style="margin-top:10px;">Run an offline accuracy report using the current threshold setting.</p>
+                    <button id="btn-eval" class="btn btn-cyan">◫ EVALUATE ACCURACY</button>
+                </div>
+
+                <!-- STEP 3 -->
+                <div class="card step-card">
+                    <div class="card-header">
+                        <span class="step-tag">STEP 03</span>
+                        <div class="title-wrap">
+                            <h3>Launch Live Monitoring</h3>
+                            <p>Real-time face recognition on webcam stream</p>
+                        </div>
+                    </div>
+                    <hr>
+                    <div class="field-row">
+                        <label>CONFIDENCE THRESHOLD</label>
+                        <span id="val-thr" class="val-lbl">0.65</span>
+                    </div>
+                    <input type="range" id="slider-thr" min="40" max="90" value="65">
+                    <div class="range-labels">
+                        <span>0.40 · LOW</span><span>0.90 · HIGH</span>
+                    </div>
+                    
+                    <div class="field-row">
+                        <label>VOTE FRAMES</label>
+                        <input type="number" id="spin-vote" min="1" max="10" value="7">
+                    </div>
+                    <p class="hint-lbl">Higher = more stable · Lower = faster (3–5 recommended)</p>
+
+                    <div id="monitor-stack">
+                        <button id="btn-monitor-start" class="btn btn-green">▶ START RECOGNITION</button>
+                        <button id="btn-monitor-stop" class="btn btn-red" style="display:none;">■ STOP MONITORING</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CENTER COLUMN: Video Panel -->
+        <div class="column col-center">
+            <div class="video-card">
+                <div class="video-bar">
+                    <div class="dots"><span style="color:#00FF88;">●</span> <span style="color:#FFAA00;">●</span> <span style="color:#FF3366;">●</span></div>
+                    <div class="feed-label">FEED / CAM_0</div>
+                    <div id="feed-status" class="feed-status">● OFFLINE</div>
+                </div>
+                <div class="video-container">
+                    <img id="video-stream" src="/video_feed" alt="Camera Feed">
+                    <div class="scanline"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT COLUMN: Identities & Status -->
+        <div class="column col-right">
+            <div class="card users-card">
+                <div class="card-header-flex">
+                    <h4 class="section-title">ENROLLED IDENTITIES</h4>
+                    <button class="icon-btn" id="btn-refresh-users">⟳</button>
+                </div>
+                <hr>
+                <div class="users-scroll" id="users-list">
+                    <!-- Users injected here -->
+                </div>
+            </div>
+            
+            <div class="card status-card">
+                <h4 class="section-title">LATEST DETECTION</h4>
+                <hr>
+                <div id="latest-detection" class="auth-label">— AWAITING STREAM</div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Modal for Evaluation Details -->
+    <div id="eval-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn">&times;</span>
+            <pre id="eval-report"></pre>
+        </div>
+    </div>
+
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

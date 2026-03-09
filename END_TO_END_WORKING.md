@@ -182,5 +182,5 @@ If recognition fails unexpectedly:
 - No model retraining required when adding users
 - Fast onboarding workflow
 - Works on standard CPU machines
-- Usable from GUI or CLI depending on operator preference
+- Usable from Web App, Desktop GUI, or CLI depending on operator preference
 - Includes measurable evaluation for reporting
