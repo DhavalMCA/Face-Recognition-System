@@ -351,9 +351,9 @@ def print_comparison_table(
 ) -> None:
     """Print comparison table: your model vs published baselines."""
     # Compute macro-averaged metrics for your model.
-    my_sensitivity = np.mean([r.sensitivity for r in results])
-    my_specificity = np.mean([r.specificity for r in results])
-    my_accuracy = np.mean([r.accuracy for r in results])
+    my_sensitivity = float(np.mean([r.sensitivity for r in results]))
+    my_specificity = float(np.mean([r.specificity for r in results]))
+    my_accuracy = float(np.mean([r.accuracy for r in results]))
 
     # Collect all models (baselines + yours) into one list.
     all_models: Dict[str, Dict[str, float]] = {**BENCHMARK_MODELS}

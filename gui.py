@@ -9,10 +9,12 @@ Usage:
 
 from __future__ import annotations
 
+import io
 import sys
 import time
 import os
 import ssl
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
@@ -48,6 +50,13 @@ from utils import (
 )
 from similarity import predict_with_prototypes
 from recognize import FrameVoter
+from evaluate_accuracy import (
+    evaluate as run_accuracy_evaluation,
+    load_prototypes as load_accuracy_prototypes,
+    print_comparison_table,
+    print_per_identity_table,
+    print_threshold_recommendation,
+)
 
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal, pyqtSlot, QSize
 from PyQt5.QtGui import (
@@ -55,7 +64,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QApplication, QFrame, QHBoxLayout,
-    QComboBox, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
+    QComboBox, QDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
     QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget,
     QVBoxLayout, QWidget, QGraphicsDropShadowEffect, QSlider, QSplitter,
     QSpacerItem,
@@ -628,6 +637,85 @@ class TrainWorker(QThread):
             self.error.emit(str(e))
 
 
+class AccuracyWorker(QThread):
+    finished_signal = pyqtSignal(str)
+    error           = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.threshold: float = THRESHOLD
+        self.metric: str = SIMILARITY_METRIC
+        self.backend: str = EMBEDDING_BACKEND
+        self.deepface_model: str = "ArcFace"
+
+    def run(self):
+        try:
+            import json as _json
+
+            backend = getattr(self, "backend", EMBEDDING_BACKEND)
+            df_model = getattr(self, "deepface_model", "ArcFace")
+            meta_path = Path(EMBEDDINGS_DIR) / "backend.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path) as _fh:
+                        meta = _json.load(_fh)
+                    trained_backend = str(meta.get("backend", backend))
+                    trained_df = str(meta.get("deepface_model") or df_model)
+                    if (trained_backend != str(backend) or
+                            (trained_backend == "deepface" and trained_df != str(df_model))):
+                        self.error.emit(
+                            f"Model mismatch! Trained with {trained_backend.upper()}, "
+                            f"but active model is {str(backend).upper()}.\n"
+                            "Please run Step 2 (BUILD EMBEDDINGS) to re-train."
+                        )
+                        return
+                except Exception:
+                    pass
+
+            prototypes, class_names = load_accuracy_prototypes(Path(EMBEDDINGS_DIR))
+            detector = load_face_detector()
+            embedder = FaceEmbedder(
+                backend=backend,
+                onnx_model_path=ONNX_MODEL_PATH,
+                deepface_model=df_model,
+            )
+
+            t0 = time.perf_counter()
+            results, total, no_face = run_accuracy_evaluation(
+                dataset_dir=Path(DATASET_DIR),
+                prototypes=prototypes,
+                class_names=class_names,
+                detector=detector,
+                embedder=embedder,
+                threshold=getattr(self, "threshold", THRESHOLD),
+                metric=getattr(self, "metric", SIMILARITY_METRIC),
+                quiet=True,
+            )
+            elapsed = time.perf_counter() - t0
+
+            report = io.StringIO()
+            with redirect_stdout(report):
+                print("FewShotFace — Accuracy Evaluation")
+                print("=" * 72)
+                print(f"Threshold        : {self.threshold:.2f}")
+                print(f"Metric           : {self.metric}")
+                print(f"Backend          : {embedder.backend_name}")
+                print(f"Total images     : {total}")
+                print(f"No face detected : {no_face}")
+                print(f"Tested images    : {total - no_face}")
+                print(f"Evaluation time  : {elapsed:.2f}s")
+                print()
+                print("Per-Identity Metrics")
+                print_per_identity_table(results)
+                print("\nComparison Table")
+                print_comparison_table(results, self.threshold, embedder.backend_name)
+                print_threshold_recommendation(results, self.threshold)
+
+            self.finished_signal.emit(report.getvalue().strip())
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class RecognitionWorker(QThread):
     frame_ready     = pyqtSignal(np.ndarray)
     person_detected = pyqtSignal(str, float, str)
@@ -788,6 +876,7 @@ class MainWindow(QMainWindow):
 
         self.enroll_worker: Optional[EnrollWorker]      = None
         self.train_worker:  Optional[TrainWorker]       = None
+        self.accuracy_worker: Optional[AccuracyWorker]  = None
         self.recog_worker:  Optional[RecognitionWorker] = None
         self._last_auth_state: Optional[str] = None
 
@@ -1199,6 +1288,18 @@ class MainWindow(QMainWindow):
         self.btn_train.clicked.connect(self._on_train)
         v.addWidget(self.btn_train)
 
+        eval_hint = QLabel("Run an offline accuracy report using the current threshold setting.")
+        eval_hint.setWordWrap(True)
+        eval_hint.setStyleSheet(f"""
+            color: {TEXT_DIM}; font-size: 8px;
+            font-family: '{SANS_FONT}'; background: transparent; border: none;
+        """)
+        v.addWidget(eval_hint)
+
+        self.btn_evaluate = _btn("◫  EVALUATE ACCURACY", CYAN)
+        self.btn_evaluate.clicked.connect(self._on_evaluate_accuracy)
+        v.addWidget(self.btn_evaluate)
+
         return card
 
     # ── Step 3 — Monitor ─────────────────────────────────────────────
@@ -1516,6 +1617,112 @@ class MainWindow(QMainWindow):
         self._refresh_users()
         QMessageBox.information(self, "Training Complete", msg)
 
+    def _set_accuracy_running(self, running: bool):
+        self.btn_evaluate.setEnabled(not running)
+        self.btn_evaluate.setText("◫  ANALYZING..." if running else "◫  EVALUATE ACCURACY")
+        self.btn_enroll.setEnabled(not running)
+        self.btn_train.setEnabled(not running)
+        self.btn_monitor.setEnabled(not running)
+        self.backend_combo.setEnabled(not running)
+        self.deepface_combo.setEnabled(not running and self.active_backend == "deepface")
+
+    @pyqtSlot()
+    def _on_evaluate_accuracy(self):
+        if self.enroll_worker and self.enroll_worker.isRunning():
+            QMessageBox.warning(self, "Capture In Progress",
+                                "Finish enrollment before running the accuracy report.")
+            return
+        if self.train_worker and self.train_worker.isRunning():
+            QMessageBox.warning(self, "Training In Progress",
+                                "Wait for Step 2 to finish before running the accuracy report.")
+            return
+        if self.recog_worker:
+            QMessageBox.warning(self, "Monitoring Active",
+                                "Stop live monitoring before running the accuracy report.")
+            return
+        if not Path(EMBEDDINGS_DIR, "prototypes.npy").exists():
+            QMessageBox.warning(self, "Not Trained",
+                                "Run Step 2 to build the recognition engine first.")
+            return
+
+        self._set_accuracy_running(True)
+        self.train_status_lbl.setText(
+            f"RUNNING ACCURACY EVALUATION  ·  threshold {self.live_threshold:.2f}")
+        self.train_status_lbl.setStyleSheet(
+            f"color: {CYAN}; font-size: 10px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
+
+        self.accuracy_worker = AccuracyWorker()
+        self.accuracy_worker.threshold = self.live_threshold
+        self.accuracy_worker.metric = SIMILARITY_METRIC
+        self.accuracy_worker.backend = self.active_backend
+        self.accuracy_worker.deepface_model = self.active_deepface_model
+        self.accuracy_worker.finished_signal.connect(self._on_accuracy_finished)
+        self.accuracy_worker.error.connect(self._on_accuracy_error)
+        self.accuracy_worker.start()
+
+    @pyqtSlot(str)
+    def _on_accuracy_finished(self, report: str):
+        self.accuracy_worker = None
+        self._set_accuracy_running(False)
+        self.train_status_lbl.setText(
+            f"✓  ACCURACY REPORT READY  ·  threshold {self.live_threshold:.2f}")
+        self.train_status_lbl.setStyleSheet(
+            f"color: {GREEN}; font-size: 10px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
+        self._show_accuracy_report(report)
+
+    @pyqtSlot(str)
+    def _on_accuracy_error(self, msg: str):
+        self.accuracy_worker = None
+        self._set_accuracy_running(False)
+        self.train_status_lbl.setText("✗  ACCURACY EVALUATION FAILED")
+        self.train_status_lbl.setStyleSheet(
+            f"color: {RED}; font-size: 10px; font-family: '{MONO_FONT}';"
+            f" background: transparent; border: none;")
+        QMessageBox.critical(self, "Accuracy Evaluation Failed", msg)
+
+    def _show_accuracy_report(self, report: str):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Accuracy Evaluation")
+        dialog.setModal(True)
+        dialog.resize(960, 720)
+        dialog.setStyleSheet(STYLESHEET)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("OFFLINE ACCURACY REPORT")
+        title.setStyleSheet(f"""
+            color: {CYAN}; font-size: 12px; font-weight: 700;
+            font-family: '{MONO_FONT}'; background: transparent; border: none;
+        """)
+        layout.addWidget(title)
+
+        viewer = QPlainTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setPlainText(report)
+        viewer.setLineWrapMode(QPlainTextEdit.NoWrap)
+        viewer.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background: {BG2};
+                color: {TEXT};
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                padding: 8px;
+                font-family: '{MONO_FONT}';
+                font-size: 11px;
+            }}
+        """)
+        layout.addWidget(viewer, stretch=1)
+
+        close_btn = _btn("CLOSE REPORT", CYAN, dialog)
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        dialog.exec_()
+
     @pyqtSlot()
     def _on_monitor(self):
         if not Path(EMBEDDINGS_DIR, "prototypes.npy").exists():
@@ -1797,6 +2004,8 @@ class MainWindow(QMainWindow):
         if self.enroll_worker:
             self.enroll_worker.stop()
             self.enroll_worker.wait(2000)
+        if self.accuracy_worker:
+            self.accuracy_worker.wait(2000)
         if self.recog_worker:
             self.recog_worker.stop()
             self.recog_worker.wait(2000)
