@@ -515,7 +515,7 @@ def detect_faces(
     """
     # Convert OpenCV BGR frame into RGB expected by MTCNN detector.
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    boxes, probs, landmarks = detector.detect(rgb, landmarks=True)
+    boxes, probs, landmarks = detector.detect(rgb, landmarks=True)  # type: ignore[misc]
 
     if boxes is None or probs is None:
         return []
@@ -687,7 +687,7 @@ class ONNXEmbedder:
         chw = np.transpose(normalized, (2, 0, 1))[None, :, :, :].astype(np.float32)
 
         outputs = self.session.run(None, {self.input_name: chw})
-        embedding = outputs[0].reshape(-1).astype(np.float32)
+        embedding = np.asarray(outputs[0]).reshape(-1).astype(np.float32)
         embedding /= np.linalg.norm(embedding) + 1e-8
         return embedding
 
@@ -715,6 +715,7 @@ class InsightFaceEmbedder:
                 "Install it with: pip install insightface"
             )
         self.model_name = model_name
+        assert _InsightFaceAnalysis is not None
         self._app = _InsightFaceAnalysis(
             name=model_name,
             providers=["CPUExecutionProvider"],
@@ -804,7 +805,7 @@ class ViTEmbedder:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         model = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
         # Remove classification head — we only want the 768-d CLS embedding.
-        model.heads = torch.nn.Identity()
+        model.heads = torch.nn.Identity()  # type: ignore[assignment]
         self.model = model.eval().to(self.device)
 
     def embed(self, face_rgb: np.ndarray) -> np.ndarray:
@@ -870,6 +871,7 @@ class DeepFaceEmbedder:
                 f"deepface model_name must be one of: {self.SUPPORTED_MODELS}"
             )
         self.model_name = model_name
+        assert _DeepFace is not None
         # Pre-warm the model so the first embed() call has no download delay.
         _DeepFace.build_model(model_name)
 
@@ -891,13 +893,14 @@ class DeepFaceEmbedder:
         # detector_backend="skip" tells DeepFace we are passing a pre-cropped
         # face, so it skips its own detection / alignment step.
         # enforce_detection=False prevents errors on marginal crops.
+        assert _DeepFace is not None
         result = _DeepFace.represent(
             img_path=enhanced,
             model_name=self.model_name,
             enforce_detection=False,
             detector_backend="skip",
         )
-        embedding = np.array(result[0]["embedding"], dtype=np.float32)
+        embedding = np.array(result[0]["embedding"], dtype=np.float32)  # type: ignore[index]
         embedding /= np.linalg.norm(embedding) + 1e-8
         return embedding
 
@@ -1161,7 +1164,7 @@ class FaceEmbedder:
     def __init__(
         self,
         backend: str = "auto",
-        onnx_model_path: str | Path = "models/arcface.onnx",
+        onnx_model_path: str | Path = "models/w600k_r50.onnx",
         insightface_model: str = "buffalo_l",
         deepface_model: str = "ArcFace",
     ) -> None:
@@ -1194,7 +1197,7 @@ class FaceEmbedder:
         def _build_onnx_with_fallback(preferred_path: str | Path) -> tuple[ONNXEmbedder | None, str | None]:
             """Try preferred ONNX path, then known backup model paths."""
             preferred = str(preferred_path)
-            candidates = [preferred, "models/w600k_r50.onnx", "models/arcface.onnx"]
+            candidates = [preferred, "models/w600k_r50.onnx"]
             seen: set[str] = set()
             unique_candidates: list[str] = []
             for cand in candidates:

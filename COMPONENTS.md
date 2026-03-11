@@ -109,6 +109,16 @@ Comparison backends (evaluated at runtime):
 ### `fix_mobile_photos.py`
 Optional preprocessing: white-balance correction, CLAHE, unsharp mask for mixed-camera datasets.
 
+### `download_models.py`
+ONNX model management utility.
+
+Usage:
+```powershell
+python download_models.py --list      # show all models/ files with size
+python download_models.py --sources   # show InsightFace download instructions
+python download_models.py --url <URL> --name mymodel.onnx --verify
+```
+
 ### `evaluate_models.py`
 Additional model-level comparison output (kept for legacy compatibility).
 
@@ -119,8 +129,8 @@ Additional model-level comparison output (kept for legacy compatibility).
 ### `utils.py`
 
 - `FaceEmbedder` — unified multi-backend wrapper (auto / facenet / onnx / insightface / deepface)
-  - Default ONNX model: `models/w600k_r50.onnx` (fallback from the corrupt `arcface.onnx`)
-  - Falls back: insightface → onnx → facenet if a backend is unavailable
+  - Default ONNX model: `models/w600k_r50.onnx` (iResNet-50, WebFace600K, 512-d embeddings)
+  - Fallback priority: InsightFace → ONNX → FaceNet if a backend is unavailable
 - `detect_faces()` — MTCNN detection with padding and confidence filtering
 - `load_face_detector()` — lazy-loaded MTCNN singleton
 - `get_identity_folders()` — list enrolled identity directories
@@ -142,7 +152,7 @@ Additional model-level comparison output (kept for legacy compatibility).
 | `embeddings/class_names.npy` | Ordered list of enrolled identities |
 | `embeddings/embeddings.npy` | All individual embeddings (used for rebuild) |
 | `embeddings/backend.json` | Backend used when embeddings were generated |
-| `models/w600k_r50.onnx` | Primary ONNX ArcFace model |
+| `models/w600k_r50.onnx` | Primary ONNX model — iResNet-50, WebFace600K, 512-d (~174 MB) |
 | `models/det_10g.onnx` | InsightFace detection model |
 
 ---

@@ -230,7 +230,7 @@ Final model metric = macro-average across all enrolled identities.
 |---|---|
 | Recognition fails to start | Check `embeddings/prototypes.npy` exists; re-run Step 3 |
 | Wrong camera | Try `--camera-id 1` |
-| ONNX protobuf error | Fixed — system uses `models/w600k_r50.onnx` automatically |
+| ONNX model not found | Run `python download_models.py --list`; confirm `models/w600k_r50.onnx` is ~174 MB |
 | Evaluation crashes on a backend | Backend is skipped with a `⚠` warning; others continue |
 
 ---

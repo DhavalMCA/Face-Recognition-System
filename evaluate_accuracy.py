@@ -84,6 +84,7 @@ COMPARISON_BACKENDS: List[Tuple[str, str, str | None, str | None]] = [
     ("InsightFace (buffalo_sc)", "insightface", None,          "buffalo_sc"),
     ("FaceNet",                  "facenet",      None,          None),
     ("ONNX (w600k_r50)",         "onnx",         None,          None),
+
     ("DeepFace ArcFace",         "deepface",     "ArcFace",     None),
     ("DeepFace VGG-Face",        "deepface",     "VGG-Face",    None),
     ("DeepFace Facenet512",      "deepface",     "Facenet512",  None),
@@ -256,7 +257,14 @@ def evaluate_backend(
         or None on error.
     """
     try:
-        kwargs: dict = {"backend": backend, "onnx_model_path": ONNX_MODEL_PATH}
+        # Support "onnx:<name>" shorthand to select a named ONNX model.
+        actual_backend = backend
+        onnx_path = ONNX_MODEL_PATH
+        if backend.startswith("onnx:"):
+            model_name = backend[len("onnx:"):]
+            actual_backend = "onnx"
+            onnx_path = f"models/{model_name}.onnx"
+        kwargs: dict = {"backend": actual_backend, "onnx_model_path": onnx_path}
         if deepface_model:
             kwargs["deepface_model"] = deepface_model
         if insightface_model:
@@ -536,6 +544,9 @@ def _comparison_resolved_name(bk: str, df_model: str | None, if_model: str | Non
         return f"insightface({if_model})" if if_model else "insightface(buffalo_l)"
     if bk == "facenet":
         return "facenet"
+    if bk.startswith("onnx:"):
+        model_name = bk[len("onnx:"):]
+        return f"onnx(models/{model_name}.onnx)"
     if bk == "onnx":
         return f"onnx({ONNX_MODEL_PATH})"
     return bk

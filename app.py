@@ -46,7 +46,7 @@ THRESHOLD = 0.65
 VOTE_FRAMES = 7
 CAMERA_INDEX = 0
 EMBEDDING_BACKEND = "auto"
-ONNX_MODEL_PATH = "models/arcface.onnx"
+ONNX_MODEL_PATH = "models/w600k_r50.onnx"
 DATASET_DIR = "dataset"
 EMBEDDINGS_DIR = "embeddings"
 

@@ -159,6 +159,9 @@ python recognize.py --backend auto --threshold 0.80 --camera-id 0
 
 # Evaluate (all backends + threshold sweep)
 python evaluate_accuracy.py --backend auto --sweep
+
+# List ONNX models in models/ folder
+python download_models.py --list
 ```
 
 ---
@@ -180,6 +183,7 @@ FewShotFace/
 ├── static/                  CSS and JS for web UI
 ├── dataset/                 Per-identity image folders
 ├── embeddings/              Generated .npy files and prototypes
+├── download_models.py        ONNX model management utility (list, verify, download)
 ├── models/                  ONNX model files (w600k_r50.onnx used by default)
 ├── README.md
 ├── COMPONENTS.md
@@ -198,7 +202,7 @@ FewShotFace/
 | Frequent *Unknown* labels | Add more images; lower threshold to `0.78`; rebuild embeddings |
 | False positives | Raise threshold to `0.82`–`0.86`; enroll lookalike family members |
 | Missing prototype error | Run Step 2 (`generate_embeddings.py`) again |
-| `INVALID_PROTOBUF` for arcface.onnx | Fixed — app now uses `models/w600k_r50.onnx` automatically |
+| ONNX model not found | Run `python download_models.py --list` to verify `models/w600k_r50.onnx` exists |
 | Evaluation takes too long | Already optimised: detection runs once, backends run in parallel |
 
 ---
@@ -372,6 +376,7 @@ FewShotFace/
 |- evaluate_accuracy.py
 |- evaluate_models.py
 |- fix_mobile_photos.py
+|- download_models.py
 |- utils.py
 |- similarity.py
 |- dataset/
@@ -395,9 +400,10 @@ FewShotFace/
   - Enroll lookalike family members as separate identities
 - Missing prototype files:
   - Run Step 2 again (`generate_embeddings.py`)
-- ONNX model error (`INVALID_PROTOBUF` for `models/arcface.onnx`):
-  - The app now auto-falls back to `models/w600k_r50.onnx` (or FaceNet if ONNX is unavailable), so GUI/recognition should still start.
-  - If you want ArcFace specifically, replace `models/arcface.onnx` with a valid file from a trusted source.
+- ONNX model not found or inference fails:
+  - The active ONNX model is `models/w600k_r50.onnx` (iResNet-50, WebFace600K, 512-d).
+  - Run `python download_models.py --list` to confirm it is present and check its size (~174 MB).
+  - The system auto-falls back to FaceNet if ONNX is unavailable.
 
 ## 10. Delivery Notes for Client Demo
 

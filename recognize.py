@@ -262,7 +262,7 @@ def recognize_realtime(
     metric: str = "cosine",
     threshold: float = 0.0,         # 0.0 -> auto-load calibrated threshold
     backend: str = "auto",
-    onnx_model_path: str = "models/arcface.onnx",
+    onnx_model_path: str = "models/w600k_r50.onnx",
     camera_id: int = 0,
     vote_frames: int = 7,
     deepface_model: str = "ArcFace",
@@ -507,7 +507,7 @@ def parse_args() -> argparse.Namespace:
         "--deepface-model", default="ArcFace",
         choices=["ArcFace", "Facenet512", "VGG-Face", "SFace", "Facenet", "OpenFace"],
     )
-    parser.add_argument("--onnx-model-path", default="models/arcface.onnx")
+    parser.add_argument("--onnx-model-path", default="models/w600k_r50.onnx")
     parser.add_argument("--camera-id", type=int, default=0)
     parser.add_argument("--vote-frames", type=int, default=7)
     parser.add_argument(

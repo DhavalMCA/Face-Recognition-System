@@ -64,7 +64,7 @@ def generate_embeddings(
     dataset_dir: str = "dataset",
     embeddings_dir: str = "embeddings",
     backend: str = "auto",
-    onnx_model_path: str = "models/arcface.onnx",
+    onnx_model_path: str = "models/w600k_r50.onnx",
     insightface_model: str = "buffalo_l",
     deepface_model: str = "ArcFace",
     use_tta: bool = True,
@@ -254,7 +254,7 @@ def parse_args() -> argparse.Namespace:
         "--deepface-model", default="ArcFace",
         choices=["ArcFace", "Facenet512", "VGG-Face", "SFace", "Facenet", "OpenFace"],
     )
-    parser.add_argument("--onnx-model-path", default="models/arcface.onnx")
+    parser.add_argument("--onnx-model-path", default="models/w600k_r50.onnx")
     parser.add_argument(
         "--insightface-model", default="buffalo_l",
         choices=["buffalo_l", "buffalo_sc"],

@@ -82,7 +82,7 @@ THRESHOLD         = 0.65   # 0.60-0.70 recommended for ArcFace; 0.65 is mid-rang
 VOTE_FRAMES       = 7
 CAMERA_INDEX      = 0
 EMBEDDING_BACKEND = "auto"
-ONNX_MODEL_PATH   = "models/arcface.onnx"
+ONNX_MODEL_PATH   = "models/w600k_r50.onnx"
 DATASET_DIR       = "dataset"
 EMBEDDINGS_DIR    = "embeddings"
 
@@ -1838,7 +1838,7 @@ class MainWindow(QMainWindow):
             0: ("auto",        "Auto-detect: InsightFace → ONNX → FaceNet"),
             1: ("insightface", "InsightFace ArcFace ResNet-50  ·  512-d  ·  ~99.7% LFW"),
             2: ("facenet",     "FaceNet InceptionResNetV1  ·  512-d  ·  ~99.6% LFW"),
-            3: ("onnx",        "Custom ONNX model  ·  requires models/arcface.onnx"),
+            3: ("onnx",        "Custom ONNX model  ·  uses models/w600k_r50.onnx"),
             4: ("deepface",    "DeepFace library  ·  select sub-model"),
             5: ("vit",         "Vision Transformer (ViT-B/16)  ·  768-d  ·  Pure Attention"),
         }

@@ -135,7 +135,7 @@ python evaluate_accuracy.py --backend auto --no-compare
 | Webcam not opening | Close other apps using camera; retry with `--camera-id 1` |
 | Frequent *Unknown* detections | Add more images per user; re-run `generate_embeddings.py`; try threshold `0.78` |
 | False positives | Raise threshold to `0.82`–`0.86`; enroll lookalike users as separate identities |
-| `INVALID_PROTOBUF` for arcface.onnx | Fixed — the system now uses `models/w600k_r50.onnx` automatically |
+| ONNX model missing or wrong size | Run `python download_models.py --list` to verify `models/w600k_r50.onnx` (~174 MB) |
 | Evaluation too slow | Already optimised: MTCNN runs once (cached crops), backends run in parallel |
 
 ---
@@ -144,7 +144,7 @@ python evaluate_accuracy.py --backend auto --no-compare
 
 - `embeddings/prototypes.npy` must exist before recognition or evaluation.
 - Rebuild embeddings after adding new users.
-- The default ONNX model is `models/w600k_r50.onnx` (the `arcface.onnx` file in this repo is corrupt and is skipped automatically).
+- The default ONNX model is `models/w600k_r50.onnx` (iResNet-50 backbone, WebFace600K trained, 512-d output).
 
 
 ## 2. Create Virtual Environment
