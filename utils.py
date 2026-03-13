@@ -42,9 +42,11 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 try:
     from deepface import DeepFace as _DeepFace
     _DEEPFACE_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency at runtime
+    _DEEPFACE_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - optional dependency at runtime
     _DeepFace = None
     _DEEPFACE_AVAILABLE = False
+    _DEEPFACE_IMPORT_ERROR = str(exc)
 
 
 def ensure_dir(path: str | Path) -> None:
@@ -1255,9 +1257,10 @@ class FaceEmbedder:
 
         if backend == "deepface":
             if not _DEEPFACE_AVAILABLE:
+                reason = f" Reason: {_DEEPFACE_IMPORT_ERROR}" if _DEEPFACE_IMPORT_ERROR else ""
                 print(
                     "[FaceEmbedder] WARNING: deepface is not installed. "
-                    "Falling back to FaceNet backend."
+                    f"Falling back to FaceNet backend.{reason}"
                 )
                 self.model = FacenetEmbedder()
                 self.backend_name = "facenet"

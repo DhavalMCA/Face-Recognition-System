@@ -89,6 +89,32 @@ ONNX_MODEL_PATH   = "models/w600k_r50.onnx"
 DATASET_DIR       = "dataset"
 EMBEDDINGS_DIR    = "embeddings"
 
+
+def _parse_embedder_backend(backend_name: str) -> dict:
+    """Convert FaceEmbedder backend_name into stable metadata fields."""
+    name = str(backend_name)
+    meta = {
+        "backend": "facenet",
+        "deepface_model": None,
+        "insightface_model": None,
+        "onnx_model_path": None,
+        "resolved_backend_name": name,
+    }
+    if name.startswith("deepface(") and name.endswith(")"):
+        meta["backend"] = "deepface"
+        meta["deepface_model"] = name[len("deepface("):-1]
+    elif name.startswith("insightface(") and name.endswith(")"):
+        meta["backend"] = "insightface"
+        meta["insightface_model"] = name[len("insightface("):-1]
+    elif name.startswith("onnx(") and name.endswith(")"):
+        meta["backend"] = "onnx"
+        meta["onnx_model_path"] = name[len("onnx("):-1]
+    elif name.startswith("vit("):
+        meta["backend"] = "vit"
+    elif name == "facenet":
+        meta["backend"] = "facenet"
+    return meta
+
 # ══════════════════════════════════════════════════════════════════════
 #  DESIGN SYSTEM — Neural Surveillance Terminal
 # ══════════════════════════════════════════════════════════════════════
@@ -598,6 +624,14 @@ class TrainWorker(QThread):
             embedder = FaceEmbedder(backend=backend,
                                     onnx_model_path=ONNX_MODEL_PATH,
                                     deepface_model=df_model)
+            resolved = _parse_embedder_backend(embedder.backend_name)
+            if backend != "auto" and resolved["backend"] != backend:
+                self.error.emit(
+                    f"Requested backend '{backend}' but runtime resolved to "
+                    f"'{embedder.backend_name}'. Install dependencies/model files for {backend} "
+                    "or switch to an available backend."
+                )
+                return
             self.progress.emit(25)
             all_embeddings, all_labels = [], []
             for i, folder in enumerate(folders):
@@ -636,8 +670,13 @@ class TrainWorker(QThread):
 
             import json as _json
             metadata = {
-                "backend": backend,
-                "deepface_model": df_model if backend == "deepface" else None
+                "backend": resolved["backend"],
+                "deepface_model": resolved["deepface_model"],
+                "insightface_model": resolved["insightface_model"],
+                "onnx_model_path": resolved["onnx_model_path"],
+                "resolved_backend_name": resolved["resolved_backend_name"],
+                "requested_backend": backend,
+                "requested_deepface_model": df_model if backend == "deepface" else None,
             }
             with open(Path(EMBEDDINGS_DIR) / "backend.json", "w") as _fh:
                 _json.dump(metadata, _fh)
@@ -682,6 +721,7 @@ class AccuracyWorker(QThread):
 
             backend = getattr(self, "backend", EMBEDDING_BACKEND)
             df_model = getattr(self, "deepface_model", "ArcFace")
+            if_model = None
             meta_path = Path(EMBEDDINGS_DIR) / "backend.json"
             if meta_path.exists():
                 try:
@@ -689,10 +729,13 @@ class AccuracyWorker(QThread):
                         meta = _json.load(_fh)
                     trained_backend = str(meta.get("backend", backend))
                     trained_df = str(meta.get("deepface_model") or df_model)
+                    trained_if = meta.get("insightface_model")
                     if str(backend) == "auto":
                         backend = trained_backend
                         if trained_backend == "deepface":
                             df_model = trained_df
+                        elif trained_backend == "insightface":
+                            if_model = trained_if
                     elif (trained_backend != str(backend) or
                             (trained_backend == "deepface" and trained_df != str(df_model))):
                         self.error.emit(
@@ -710,7 +753,15 @@ class AccuracyWorker(QThread):
                 backend=backend,
                 onnx_model_path=ONNX_MODEL_PATH,
                 deepface_model=df_model,
+                insightface_model=if_model or "buffalo_l",
             )
+            resolved = _parse_embedder_backend(embedder.backend_name)
+            if backend != "auto" and resolved["backend"] != backend:
+                self.error.emit(
+                    f"Requested backend '{backend}' but runtime resolved to '{embedder.backend_name}'. "
+                    "This usually means missing dependencies or model files on this machine."
+                )
+                return
 
             # Pre-detect all face crops once — shared across every backend.
             face_cache = precompute_face_crops(Path(DATASET_DIR), detector)
@@ -789,6 +840,7 @@ class RecognitionWorker(QThread):
             detector   = load_face_detector()
             backend    = getattr(self, "backend", EMBEDDING_BACKEND)
             df_model   = getattr(self, "deepface_model", "ArcFace")
+            if_model   = None
 
             meta_path = Path(EMBEDDINGS_DIR) / "backend.json"
             if meta_path.exists():
@@ -797,11 +849,14 @@ class RecognitionWorker(QThread):
                         meta = _json.load(_fh)
                     trained_backend = str(meta.get("backend") or "").strip().lower()
                     trained_df = str(meta.get("deepface_model") or "").strip()
+                    trained_if = str(meta.get("insightface_model") or "").strip()
 
                     if backend == "auto" and trained_backend:
                         backend = trained_backend
                         if trained_backend == "deepface" and trained_df:
                             df_model = trained_df
+                        if trained_backend == "insightface" and trained_if:
+                            if_model = trained_if
                     elif (
                         str(trained_backend) != str(backend) or
                         (backend == "deepface" and str(trained_df) != str(df_model))
@@ -817,7 +872,15 @@ class RecognitionWorker(QThread):
 
             embedder   = FaceEmbedder(backend=backend,
                                       onnx_model_path=ONNX_MODEL_PATH,
-                                      deepface_model=df_model)
+                                      deepface_model=df_model,
+                                      insightface_model=if_model or "buffalo_l")
+            resolved = _parse_embedder_backend(embedder.backend_name)
+            if backend != "auto" and resolved["backend"] != backend:
+                self.error.emit(
+                    f"Requested backend '{backend}' but runtime resolved to '{embedder.backend_name}'. "
+                    "Please install missing dependencies/model files and retry."
+                )
+                return
             proto_path = Path(EMBEDDINGS_DIR) / "prototypes.npy"
             names_path = Path(EMBEDDINGS_DIR) / "class_names.npy"
             if proto_path.exists() and names_path.exists():
@@ -904,7 +967,7 @@ class RecognitionWorker(QThread):
                     cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
                     cv2.putText(frame, name, (x1 + 6, y1 - 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 235, 250), 2)
-                    cv2.putText(frame, f"{conf*100:.0f}% | {status}",
+                    cv2.putText(frame, f"{conf*100:.2f}% | {status}",
                                 (x1 + 6, y1 - 8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
                     self.person_detected.emit(
@@ -1835,7 +1898,7 @@ class MainWindow(QMainWindow):
         if name != "Unknown":
             state = "authorized"
             self.auth_label.setText(
-                f"✓  AUTHORIZED  —  {name}  [{conf*100:.0f}%]")
+                f"✓  AUTHORIZED  —  {name}  [{conf*100:.2f}%]")
             if state != self._last_auth_state:
                 self._last_auth_state = state
                 self.auth_label.setStyleSheet(
@@ -1845,7 +1908,7 @@ class MainWindow(QMainWindow):
         else:
             state = "unknown"
             self.auth_label.setText(
-                f"✗  UNKNOWN SUBJECT  —  {conf*100:.0f}%  MATCH")
+                f"✗  UNKNOWN SUBJECT  —  {conf*100:.2f}%  MATCH")
             if state != self._last_auth_state:
                 self._last_auth_state = state
                 self.auth_label.setStyleSheet(

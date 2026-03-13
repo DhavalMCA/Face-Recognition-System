@@ -60,6 +60,32 @@ class EngineConfig:
         
 cfg = EngineConfig()
 
+
+def _parse_embedder_backend(backend_name: str) -> dict:
+    """Convert FaceEmbedder backend_name into stable metadata fields."""
+    name = str(backend_name)
+    meta = {
+        "backend": "facenet",
+        "deepface_model": None,
+        "insightface_model": None,
+        "onnx_model_path": None,
+        "resolved_backend_name": name,
+    }
+    if name.startswith("deepface(") and name.endswith(")"):
+        meta["backend"] = "deepface"
+        meta["deepface_model"] = name[len("deepface("):-1]
+    elif name.startswith("insightface(") and name.endswith(")"):
+        meta["backend"] = "insightface"
+        meta["insightface_model"] = name[len("insightface("):-1]
+    elif name.startswith("onnx(") and name.endswith(")"):
+        meta["backend"] = "onnx"
+        meta["onnx_model_path"] = name[len("onnx("):-1]
+    elif name.startswith("vit("):
+        meta["backend"] = "vit"
+    elif name == "facenet":
+        meta["backend"] = "facenet"
+    return meta
+
 class AppState:
     def __init__(self):
         self.mode = "idle" # idle, enroll, train, monitor
@@ -113,6 +139,19 @@ def train_worker(backend, df_model):
         with state.lock: state.train_progress = 10
         detector = load_face_detector()
         embedder = FaceEmbedder(backend=backend, onnx_model_path=ONNX_MODEL_PATH, deepface_model=df_model)
+        resolved = _parse_embedder_backend(embedder.backend_name)
+
+        # Prevent silent fallback (for example deepface -> facenet when dependency is missing).
+        if backend != "auto" and resolved["backend"] != backend:
+            with state.lock:
+                state.train_status = "ERROR"
+                state.train_message = (
+                    f"Requested backend '{backend}' but runtime resolved to "
+                    f"'{embedder.backend_name}'. Install dependencies/model files for {backend} "
+                    "or switch to an available backend."
+                )
+                state.mode = "idle"
+            return
         
         with state.lock: state.train_progress = 25
         all_embeddings, all_labels = [], []
@@ -149,7 +188,15 @@ def train_worker(backend, df_model):
         emb_arr = emb_arr / (norms + 1e-8)
         
         import json as _json
-        metadata = {"backend": backend, "deepface_model": df_model if backend == "deepface" else None}
+        metadata = {
+            "backend": resolved["backend"],
+            "deepface_model": resolved["deepface_model"],
+            "insightface_model": resolved["insightface_model"],
+            "onnx_model_path": resolved["onnx_model_path"],
+            "resolved_backend_name": resolved["resolved_backend_name"],
+            "requested_backend": backend,
+            "requested_deepface_model": df_model if backend == "deepface" else None,
+        }
         with open(Path(EMBEDDINGS_DIR) / "backend.json", "w") as _fh:
             _json.dump(metadata, _fh)
             
@@ -395,9 +442,9 @@ def camera_loop():
                         cv2.rectangle(overlay, (x1, max(0, y1 - 50)), (x2, y1), (8, 12, 20), -1)
                         cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
                         cv2.putText(frame, name, (x1 + 6, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 235, 250), 2)
-                        cv2.putText(frame, f"{conf*100:.0f}% | {status}", (x1 + 6, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
+                        cv2.putText(frame, f"{conf*100:.2f}% | {status}", (x1 + 6, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1)
                         
-                        latest_dets.append(f"{name} ({conf*100:.0f}%)")
+                        latest_dets.append(f"{name} ({conf*100:.2f}%)")
                 
                 if latest_dets:
                     with state.lock:
@@ -543,6 +590,7 @@ def evaluate():
     try:
         backend = cfg.backend
         df_model = cfg.deepface_model
+        if_model = None
         
         meta_path = Path(EMBEDDINGS_DIR) / "backend.json"
         if meta_path.exists():
@@ -550,16 +598,32 @@ def evaluate():
                 meta = _json.load(_fh)
             trained_backend = str(meta.get("backend", backend))
             trained_df = str(meta.get("deepface_model") or df_model)
+            trained_if = meta.get("insightface_model")
             if str(backend) == "auto":
                 backend = trained_backend
                 if trained_backend == "deepface":
                     df_model = trained_df
+                elif trained_backend == "insightface":
+                    if_model = trained_if
             elif (trained_backend != str(backend) or (trained_backend == "deepface" and trained_df != str(df_model))):
                 return jsonify({"error": f"Model mismatch! Trained with {trained_backend.upper()}, but active model is {str(backend).upper()}."}), 400
 
         prototypes, class_names = load_accuracy_prototypes(Path(EMBEDDINGS_DIR))
         detector = load_face_detector()
-        embedder = FaceEmbedder(backend=backend, onnx_model_path=ONNX_MODEL_PATH, deepface_model=df_model)
+        embedder = FaceEmbedder(
+            backend=backend,
+            onnx_model_path=ONNX_MODEL_PATH,
+            deepface_model=df_model,
+            insightface_model=if_model or "buffalo_l",
+        )
+        resolved = _parse_embedder_backend(embedder.backend_name)
+        if backend != "auto" and resolved["backend"] != backend:
+            return jsonify({
+                "error": (
+                    f"Requested backend '{backend}' but runtime resolved to '{embedder.backend_name}'. "
+                    "This usually means missing dependencies or model files on this machine."
+                )
+            }), 400
 
         # Pre-detect all face crops once — shared across every backend.
         face_cache = precompute_face_crops(Path(DATASET_DIR), detector)
