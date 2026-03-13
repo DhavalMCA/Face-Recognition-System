@@ -11,3 +11,4 @@ pillow
 PyQt5
 prettytable
 deepface
+tf-keras

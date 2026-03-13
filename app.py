@@ -143,12 +143,14 @@ def train_worker(backend, df_model):
 
         # Prevent silent fallback (for example deepface -> facenet when dependency is missing).
         if backend != "auto" and resolved["backend"] != backend:
+            reason = getattr(embedder, "backend_error", None)
+            details = f" Reason: {reason}" if reason else ""
             with state.lock:
                 state.train_status = "ERROR"
                 state.train_message = (
                     f"Requested backend '{backend}' but runtime resolved to "
                     f"'{embedder.backend_name}'. Install dependencies/model files for {backend} "
-                    "or switch to an available backend."
+                    f"or switch to an available backend.{details}"
                 )
                 state.mode = "idle"
             return
@@ -618,10 +620,12 @@ def evaluate():
         )
         resolved = _parse_embedder_backend(embedder.backend_name)
         if backend != "auto" and resolved["backend"] != backend:
+            reason = getattr(embedder, "backend_error", None)
+            details = f" Reason: {reason}" if reason else ""
             return jsonify({
                 "error": (
                     f"Requested backend '{backend}' but runtime resolved to '{embedder.backend_name}'. "
-                    "This usually means missing dependencies or model files on this machine."
+                    f"This usually means missing dependencies or model files on this machine.{details}"
                 )
             }), 400
 

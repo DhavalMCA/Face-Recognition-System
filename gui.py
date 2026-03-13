@@ -626,10 +626,12 @@ class TrainWorker(QThread):
                                     deepface_model=df_model)
             resolved = _parse_embedder_backend(embedder.backend_name)
             if backend != "auto" and resolved["backend"] != backend:
+                reason = getattr(embedder, "backend_error", None)
+                details = f"\n\nReason: {reason}" if reason else ""
                 self.error.emit(
                     f"Requested backend '{backend}' but runtime resolved to "
                     f"'{embedder.backend_name}'. Install dependencies/model files for {backend} "
-                    "or switch to an available backend."
+                    f"or switch to an available backend.{details}"
                 )
                 return
             self.progress.emit(25)
@@ -757,9 +759,11 @@ class AccuracyWorker(QThread):
             )
             resolved = _parse_embedder_backend(embedder.backend_name)
             if backend != "auto" and resolved["backend"] != backend:
+                reason = getattr(embedder, "backend_error", None)
+                details = f"\n\nReason: {reason}" if reason else ""
                 self.error.emit(
                     f"Requested backend '{backend}' but runtime resolved to '{embedder.backend_name}'. "
-                    "This usually means missing dependencies or model files on this machine."
+                    f"This usually means missing dependencies or model files on this machine.{details}"
                 )
                 return
 
@@ -876,9 +880,11 @@ class RecognitionWorker(QThread):
                                       insightface_model=if_model or "buffalo_l")
             resolved = _parse_embedder_backend(embedder.backend_name)
             if backend != "auto" and resolved["backend"] != backend:
+                reason = getattr(embedder, "backend_error", None)
+                details = f"\n\nReason: {reason}" if reason else ""
                 self.error.emit(
                     f"Requested backend '{backend}' but runtime resolved to '{embedder.backend_name}'. "
-                    "Please install missing dependencies/model files and retry."
+                    f"Please install missing dependencies/model files and retry.{details}"
                 )
                 return
             proto_path = Path(EMBEDDINGS_DIR) / "prototypes.npy"

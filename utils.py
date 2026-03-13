@@ -1230,13 +1230,21 @@ class FaceEmbedder:
             Decouples pipeline code from backend-specific implementation.
         """
         self.backend_name = backend
+        self.backend_error: str | None = None
 
-        def _build_onnx_with_fallback(preferred_path: str | Path) -> tuple[ONNXEmbedder | None, str | None]:
+        def _fallback_to_facenet(reason: str, warning: str) -> None:
+            print(warning)
+            self.model = FacenetEmbedder()
+            self.backend_name = "facenet"
+            self.backend_error = reason
+
+        def _build_onnx_with_fallback(preferred_path: str | Path) -> tuple[ONNXEmbedder | None, str | None, str | None]:
             """Try preferred ONNX path, then known backup model paths."""
             preferred = str(preferred_path)
             candidates = [preferred, "models/w600k_r50.onnx"]
             seen: set[str] = set()
             unique_candidates: list[str] = []
+            errors: list[str] = []
             for cand in candidates:
                 cand_s = str(cand)
                 if cand_s not in seen:
@@ -1245,12 +1253,16 @@ class FaceEmbedder:
 
             for cand in unique_candidates:
                 if not Path(cand).exists():
+                    errors.append(f"{cand}: file not found")
                     continue
                 try:
-                    return ONNXEmbedder(cand), cand
+                    return ONNXEmbedder(cand), cand, None
                 except Exception as exc:
+                    errors.append(f"{cand}: {type(exc).__name__}: {exc}")
                     print(f"[FaceEmbedder] WARNING: Failed to load ONNX model '{cand}': {exc}")
-            return None, None
+            if errors:
+                return None, None, " | ".join(errors)
+            return None, None, "No ONNX model candidates were available."
 
         if backend not in {"auto", "facenet", "onnx", "insightface", "deepface", "vit"}:
             raise ValueError("backend must be one of: auto, facenet, onnx, insightface, deepface, vit")
@@ -1258,46 +1270,42 @@ class FaceEmbedder:
         if backend == "deepface":
             if not _DEEPFACE_AVAILABLE:
                 reason = f" Reason: {_DEEPFACE_IMPORT_ERROR}" if _DEEPFACE_IMPORT_ERROR else ""
-                print(
+                _fallback_to_facenet(
+                    f"deepface import failed.{reason}".strip(),
                     "[FaceEmbedder] WARNING: deepface is not installed. "
                     f"Falling back to FaceNet backend.{reason}"
                 )
-                self.model = FacenetEmbedder()
-                self.backend_name = "facenet"
             else:
                 self.model = DeepFaceEmbedder(deepface_model)
                 self.backend_name = f"deepface({deepface_model})"
         elif backend == "insightface":
             if not _INSIGHTFACE_AVAILABLE:
-                print(
+                _fallback_to_facenet(
+                    "insightface import failed.",
                     "[FaceEmbedder] WARNING: insightface is not installed. "
                     "Falling back to FaceNet backend."
                 )
-                self.model = FacenetEmbedder()
-                self.backend_name = "facenet"
             else:
                 self.model = InsightFaceEmbedder(insightface_model)
                 self.backend_name = f"insightface({insightface_model})"
         elif backend == "onnx":
             if ort is None:
-                print(
+                _fallback_to_facenet(
+                    "onnxruntime is not installed.",
                     "[FaceEmbedder] WARNING: onnxruntime is not installed. "
                     "Falling back to FaceNet backend."
                 )
-                self.model = FacenetEmbedder()
-                self.backend_name = "facenet"
             else:
-                onnx_model, loaded_path = _build_onnx_with_fallback(onnx_model_path)
+                onnx_model, loaded_path, error_reason = _build_onnx_with_fallback(onnx_model_path)
                 if onnx_model is not None:
                     self.model = onnx_model
                     self.backend_name = f"onnx({loaded_path})"
                 else:
-                    print(
+                    _fallback_to_facenet(
+                        error_reason or "No valid ONNX model could be loaded.",
                         "[FaceEmbedder] WARNING: No valid ONNX model could be loaded. "
                         "Falling back to FaceNet backend."
                     )
-                    self.model = FacenetEmbedder()
-                    self.backend_name = "facenet"
         elif backend == "facenet":
             self.model = FacenetEmbedder()
             self.backend_name = "facenet"
@@ -1310,13 +1318,14 @@ class FaceEmbedder:
                 self.model = InsightFaceEmbedder(insightface_model)
                 self.backend_name = f"insightface({insightface_model})"
             elif ort is not None:
-                onnx_model, loaded_path = _build_onnx_with_fallback(onnx_model_path)
+                onnx_model, loaded_path, error_reason = _build_onnx_with_fallback(onnx_model_path)
                 if onnx_model is not None:
                     self.model = onnx_model
                     self.backend_name = f"onnx({loaded_path})"
                 else:
                     self.model = FacenetEmbedder()
                     self.backend_name = "facenet"
+                    self.backend_error = error_reason
             else:
                 self.model = FacenetEmbedder()
                 self.backend_name = "facenet"

@@ -2,17 +2,46 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.metadata
 import json
 import platform
 import sys
 from pathlib import Path
 
 
+MODULE_DISTRIBUTIONS = {
+    "cv2": "opencv-python",
+    "sklearn": "scikit-learn",
+    "facenet_pytorch": "facenet-pytorch",
+}
+
+
+def resolve_version(module_name: str, module: object) -> str:
+    version = getattr(module, "__version__", None)
+    if version:
+        return str(version)
+
+    distribution_name = MODULE_DISTRIBUTIONS.get(module_name, module_name)
+    try:
+        return importlib.metadata.version(distribution_name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def check_import(module_name: str) -> tuple[bool, str]:
     try:
         module = importlib.import_module(module_name)
-        version = getattr(module, "__version__", "unknown")
+        version = resolve_version(module_name, module)
         return True, str(version)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def check_deepface_runtime() -> tuple[bool, str]:
+    try:
+        from deepface import DeepFace  # noqa: F401
+
+        return True, "DeepFace runtime import OK"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
 
@@ -46,6 +75,15 @@ def print_import_checks() -> bool:
         tag = "OK" if ok else "FAIL"
         print(f"  - {name:<15} {tag:<4} {msg}")
         all_ok = all_ok and ok
+
+    deepface_ok, deepface_msg = check_deepface_runtime()
+    deepface_tag = "OK" if deepface_ok else "FAIL"
+    print(f"  - {'deepface_runtime':<15} {deepface_tag:<4} {deepface_msg}")
+    all_ok = all_ok and deepface_ok
+
+    if not deepface_ok and "tf-keras" in deepface_msg.lower():
+        print("    Fix: install tf-keras in the active environment:")
+        print("         python -m pip install tf-keras")
     print()
     return all_ok
 

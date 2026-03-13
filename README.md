@@ -49,6 +49,8 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+If you use the DeepFace backend on Python 3.12 with recent TensorFlow builds, `tf-keras` is also required. It is included in `requirements.txt`.
+
 ### 3.2 Launch Web Application (recommended)
 
 ```powershell
@@ -198,6 +200,7 @@ FewShotFace/
 | Symptom | Fix |
 |---|---|
 | Import errors in VS Code | Set interpreter to `.venv\Scripts\python.exe` |
+| DeepFace falls back to FaceNet | Reinstall dependencies in the active `.venv`; ensure `tf-keras` is installed, then rerun `client_backend_healthcheck.py` |
 | Webcam not opening | Close other camera apps; try `--camera-id 1` |
 | Frequent *Unknown* labels | Add more images; lower threshold to `0.78`; rebuild embeddings |
 | False positives | Raise threshold to `0.82`–`0.86`; enroll lookalike family members |
