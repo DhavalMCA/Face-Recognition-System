@@ -43,7 +43,10 @@ from utils import (
     compute_class_prototypes,
     detect_faces,
     ensure_dir,
+    format_size,
+    get_dir_size,
     get_enhanced_crop,
+    get_file_size,
     get_identity_folders,
     load_face_detector,
     load_saved_embeddings,
@@ -474,7 +477,7 @@ class IndicatorPill(QFrame):
 class EnrollWorker(QThread):
     frame_ready     = pyqtSignal(np.ndarray)
     face_captured   = pyqtSignal(np.ndarray, int)
-    finished_signal = pyqtSignal(int)
+    finished_signal = pyqtSignal(str)
     error           = pyqtSignal(str)
 
     def __init__(self, name: str, num_images: int):
@@ -488,6 +491,7 @@ class EnrollWorker(QThread):
 
     def run(self):
         try:
+            started_at = time.perf_counter()
             detector   = load_face_detector()
             person_dir = Path(DATASET_DIR) / self.name
             ensure_dir(person_dir)
@@ -499,6 +503,7 @@ class EnrollWorker(QThread):
                 return
 
             captured, frame_count, min_gap = 0, 0, 6
+            last_img_size = format_size(0)
             HINTS = {
                 1:  "Look straight at camera",
                 2:  "Tilt head slightly LEFT",
@@ -542,7 +547,9 @@ class EnrollWorker(QThread):
                         continue
                     face_bgr = cv2.cvtColor(largest.face_rgb, cv2.COLOR_RGB2BGR)
                     fname    = f"{self.name}_{int(time.time()*1000)}_{captured+1}.jpg"
-                    cv2.imwrite(str(person_dir / fname), face_bgr)
+                    saved_path = person_dir / fname
+                    cv2.imwrite(str(saved_path), face_bgr)
+                    last_img_size = format_size(get_file_size(saved_path))
                     captured += 1
                     self.face_captured.emit(largest.face_rgb, captured)
 
@@ -556,7 +563,12 @@ class EnrollWorker(QThread):
                 cv2.waitKey(1)
 
             cap.release()
-            self.finished_signal.emit(captured)
+            elapsed = max(0.0, time.perf_counter() - started_at)
+            folder_size = format_size(get_dir_size(person_dir))
+            self.finished_signal.emit(
+                f"Successfully enrolled {captured} face samples in {elapsed:.2f}s "
+                f"(last: {last_img_size}, total: {folder_size})."
+            )
         except Exception as e:
             self.error.emit(str(e))
 
@@ -573,6 +585,7 @@ class TrainWorker(QThread):
 
     def run(self):
         try:
+            started_at = time.perf_counter()
             backend  = getattr(self, "backend", EMBEDDING_BACKEND)
             df_model = getattr(self, "deepface_model", "ArcFace")
             ensure_dir(EMBEDDINGS_DIR)
@@ -636,9 +649,18 @@ class TrainWorker(QThread):
             np.save(Path(EMBEDDINGS_DIR) / "prototypes.npy",  protos)
             np.save(Path(EMBEDDINGS_DIR) / "class_names.npy", names)
 
+            elapsed = time.perf_counter() - started_at
+            artifacts_size = (
+                get_file_size(Path(EMBEDDINGS_DIR) / "embeddings.npy")
+                + get_file_size(Path(EMBEDDINGS_DIR) / "labels.npy")
+                + get_file_size(Path(EMBEDDINGS_DIR) / "prototypes.npy")
+                + get_file_size(Path(EMBEDDINGS_DIR) / "class_names.npy")
+            )
+
             self.progress.emit(100)
             self.finished_signal.emit(
-                f"Trained on {len(emb_arr)} samples · {len(names)} identities")
+                f"Trained on {len(emb_arr)} samples | {len(names)} identities | "
+                f"Time: {elapsed:.2f}s | Size: {format_size(artifacts_size)}")
         except Exception as e:
             self.error.emit(str(e))
 
@@ -667,7 +689,11 @@ class AccuracyWorker(QThread):
                         meta = _json.load(_fh)
                     trained_backend = str(meta.get("backend", backend))
                     trained_df = str(meta.get("deepface_model") or df_model)
-                    if (trained_backend != str(backend) or
+                    if str(backend) == "auto":
+                        backend = trained_backend
+                        if trained_backend == "deepface":
+                            df_model = trained_df
+                    elif (trained_backend != str(backend) or
                             (trained_backend == "deepface" and trained_df != str(df_model))):
                         self.error.emit(
                             f"Model mismatch! Trained with {trained_backend.upper()}, "
@@ -763,6 +789,32 @@ class RecognitionWorker(QThread):
             detector   = load_face_detector()
             backend    = getattr(self, "backend", EMBEDDING_BACKEND)
             df_model   = getattr(self, "deepface_model", "ArcFace")
+
+            meta_path = Path(EMBEDDINGS_DIR) / "backend.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path) as _fh:
+                        meta = _json.load(_fh)
+                    trained_backend = str(meta.get("backend") or "").strip().lower()
+                    trained_df = str(meta.get("deepface_model") or "").strip()
+
+                    if backend == "auto" and trained_backend:
+                        backend = trained_backend
+                        if trained_backend == "deepface" and trained_df:
+                            df_model = trained_df
+                    elif (
+                        str(trained_backend) != str(backend) or
+                        (backend == "deepface" and str(trained_df) != str(df_model))
+                    ):
+                        self.error.emit(
+                            f"Model mismatch! Trained with {str(trained_backend).upper()}, "
+                            f"but active model is {str(backend).upper()}.\n"
+                            "Please run Step 2 (BUILD EMBEDDINGS) to re-train."
+                        )
+                        return
+                except Exception:
+                    pass
+
             embedder   = FaceEmbedder(backend=backend,
                                       onnx_model_path=ONNX_MODEL_PATH,
                                       deepface_model=df_model)
@@ -779,23 +831,6 @@ class RecognitionWorker(QThread):
             if len(prototypes) == 0:
                 self.error.emit("No trained data. Run Step 2 first.")
                 return
-
-            meta_path = Path(EMBEDDINGS_DIR) / "backend.json"
-            if meta_path.exists():
-                try:
-                    with open(meta_path) as _fh:
-                        meta = _json.load(_fh)
-                    trained_backend = meta.get("backend")
-                    trained_df      = meta.get("deepface_model")
-                    if (str(trained_backend) != str(backend) or
-                            (backend == "deepface" and str(trained_df) != str(df_model))):
-                        self.error.emit(
-                            f"Model mismatch! Trained with {str(trained_backend).upper()}, "
-                            f"but active model is {str(backend).upper()}.\n"
-                            "Please run Step 2 (BUILD EMBEDDINGS) to re-train.")
-                        return
-                except Exception:
-                    pass
 
             base_threshold = getattr(self, "live_threshold", THRESHOLD)
 
@@ -1587,8 +1622,8 @@ class MainWindow(QMainWindow):
         lbl.setPixmap(QPixmap.fromImage(qi))
         self.thumb_layout.insertWidget(self.thumb_layout.count() - 1, lbl)
 
-    @pyqtSlot(int)
-    def _on_enroll_finished(self, captured: int):
+    @pyqtSlot(str)
+    def _on_enroll_finished(self, message: str):
         self.btn_enroll.setEnabled(True)
         self.btn_enroll.setText("◉  CAPTURE FACE")
         self.backend_combo.setEnabled(True)
@@ -1598,8 +1633,7 @@ class MainWindow(QMainWindow):
         self.feed_status_lbl.setStyleSheet(
             f"color: {TEXT_DIM}; font-size: 9px; font-family: '{MONO_FONT}';"
             f" background: transparent; border: none;")
-        QMessageBox.information(self, "Enrollment Complete",
-                                f"Successfully enrolled {captured} face samples.")
+        QMessageBox.information(self, "Enrollment Complete", message)
         self._refresh_users()
         self.video_label.setText(
             "▷  CAMERA FEED  ◁\n\nInitialize a workflow step to begin stream")
@@ -1936,13 +1970,14 @@ class MainWindow(QMainWindow):
                 imgs = (list(folder.glob("*.jpg")) +
                         list(folder.glob("*.png")) +
                         list(folder.glob("*.jpeg")))
+                size_human = format_size(get_dir_size(folder))
                 self.users_layout.addWidget(
-                    self._user_card(folder.name, len(imgs), imgs, emb_ok))
+                    self._user_card(folder.name, len(imgs), size_human, imgs, emb_ok))
 
         self.users_layout.addStretch()
 
     def _user_card(self, name: str, count: int,
-                   imgs: list, trained: bool) -> QFrame:
+                   size_human: str, imgs: list, trained: bool) -> QFrame:
         card = QFrame()
         card.setFrameShape(QFrame.NoFrame)
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1998,7 +2033,7 @@ class MainWindow(QMainWindow):
             font-size: 11px; font-weight: 700; color: {TEXT};
             font-family: '{SANS_FONT}'; background: transparent; border: none;
         """)
-        c_lbl = QLabel(f"{count} samples")
+        c_lbl = QLabel(f"{count} samples | {size_human}")
         c_lbl.setStyleSheet(f"""
             font-size: 9px; color: {TEXT_DIM}; font-family: '{MONO_FONT}';
             background: transparent; border: none;

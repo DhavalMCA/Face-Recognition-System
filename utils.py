@@ -69,6 +69,41 @@ def ensure_dir(path: str | Path) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
+def format_size(num_bytes: int) -> str:
+    """Convert a byte count to a readable size string (B, KB, MB, GB)."""
+    size = float(max(0, num_bytes))
+    units = ["B", "KB", "MB", "GB", "TB"]
+    unit_idx = 0
+    while size >= 1024.0 and unit_idx < len(units) - 1:
+        size /= 1024.0
+        unit_idx += 1
+    return f"{size:.2f} {units[unit_idx]}"
+
+
+def get_file_size(path: str | Path) -> int:
+    """Return file size in bytes, or 0 if path is missing/unreadable."""
+    try:
+        return int(Path(path).stat().st_size)
+    except Exception:
+        return 0
+
+
+def get_dir_size(path: str | Path) -> int:
+    """Return recursive directory size in bytes.
+
+    Unreadable files are skipped to keep runtime stable.
+    """
+    root = Path(path)
+    if not root.exists() or not root.is_dir():
+        return 0
+
+    total = 0
+    for file_path in root.rglob("*"):
+        if file_path.is_file():
+            total += get_file_size(file_path)
+    return total
+
+
 def get_identity_folders(dataset_dir: str | Path) -> List[Path]:
     """List all enrolled identity folders in dataset root.
 
@@ -1176,7 +1211,7 @@ class FaceEmbedder:
         Purpose:
             Selects and initializes concrete embedding backend implementation.
             Priority when backend='auto': InsightFace > ONNX > FaceNet.
-
+ 
         Parameters:
             backend (str): Requested backend mode
                 (auto / facenet / onnx / insightface / deepface).

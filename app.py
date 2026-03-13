@@ -25,7 +25,7 @@ from flask import Flask, render_template, Response, request, jsonify
 from utils import (
     FaceEmbedder, FaceTracker, align_face_from_landmarks,
     build_augmented_prototypes, compute_class_prototypes, detect_faces,
-    ensure_dir, get_enhanced_crop, get_identity_folders,
+    ensure_dir, format_size, get_dir_size, get_enhanced_crop, get_file_size, get_identity_folders,
     load_face_detector, load_saved_embeddings
 )
 from similarity import predict_with_prototypes
@@ -63,7 +63,7 @@ cfg = EngineConfig()
 class AppState:
     def __init__(self):
         self.mode = "idle" # idle, enroll, train, monitor
-        self.current_frame = None
+        self.current_frame: Optional[Any] = None
         self.lock = threading.Lock()
         
         # Enroll State
@@ -71,6 +71,7 @@ class AppState:
         self.enroll_target = 0
         self.enroll_captured = 0
         self.enroll_message = ""
+        self.enroll_started_at = 0.0
         
         # Train State
         self.train_progress = 0
@@ -93,6 +94,7 @@ def get_camera():
     return cap
 
 def train_worker(backend, df_model):
+    started_at = time.perf_counter()
     with state.lock:
         state.train_status = "EXTRACTING FEATURES..."
         state.train_progress = 0
@@ -157,11 +159,22 @@ def train_worker(backend, df_model):
         protos, names = build_augmented_prototypes(emb_arr, lbl_arr)
         np.save(Path(EMBEDDINGS_DIR) / "prototypes.npy", protos)
         np.save(Path(EMBEDDINGS_DIR) / "class_names.npy", names)
+
+        elapsed = time.perf_counter() - started_at
+        artifacts_size = (
+            get_file_size(Path(EMBEDDINGS_DIR) / "embeddings.npy")
+            + get_file_size(Path(EMBEDDINGS_DIR) / "labels.npy")
+            + get_file_size(Path(EMBEDDINGS_DIR) / "prototypes.npy")
+            + get_file_size(Path(EMBEDDINGS_DIR) / "class_names.npy")
+        )
         
         with state.lock:
             state.train_progress = 100
             state.train_status = "DONE"
-            state.train_message = f"Trained on {len(emb_arr)} samples | {len(names)} identities"
+            state.train_message = (
+                f"Trained on {len(emb_arr)} samples | {len(names)} identities | "
+                f"Time: {elapsed:.2f}s | Size: {format_size(artifacts_size)}"
+            )
             state.mode = "idle"
             
     except Exception as e:
@@ -219,7 +232,36 @@ def camera_loop():
                 if current_mode == 'monitor':
                     # load model
                     try:
-                        embedder = FaceEmbedder(backend=cfg.backend, onnx_model_path=ONNX_MODEL_PATH, deepface_model=cfg.deepface_model)
+                        # If UI is set to AUTO, prefer the backend used during training
+                        # so saved embeddings/prototypes remain compatible.
+                        effective_backend = cfg.backend
+                        effective_df_model = cfg.deepface_model
+
+                        meta_path = Path(EMBEDDINGS_DIR) / "backend.json"
+                        if meta_path.exists():
+                            with open(meta_path) as _fh:
+                                meta = _json.load(_fh)
+                            trained_backend = str(meta.get("backend") or "").strip().lower()
+                            trained_df = str(meta.get("deepface_model") or "").strip()
+
+                            if cfg.backend == "auto" and trained_backend:
+                                effective_backend = trained_backend
+                                if trained_backend == "deepface" and trained_df:
+                                    effective_df_model = trained_df
+                            elif (
+                                str(trained_backend) != str(cfg.backend) or
+                                (cfg.backend == "deepface" and str(trained_df) != str(cfg.deepface_model))
+                            ):
+                                with state.lock:
+                                    state.monitor_error = "Model mismatch! Re-train required."
+                                    state.mode = 'idle'
+                                continue
+
+                        embedder = FaceEmbedder(
+                            backend=effective_backend,
+                            onnx_model_path=ONNX_MODEL_PATH,
+                            deepface_model=effective_df_model,
+                        )
                         proto_path = Path(EMBEDDINGS_DIR) / "prototypes.npy"
                         names_path = Path(EMBEDDINGS_DIR) / "class_names.npy"
                         if proto_path.exists() and names_path.exists():
@@ -233,18 +275,6 @@ def camera_loop():
                         vf = cfg.vote_frames
                         voter = FrameVoter(window=vf, max_missed_frames=12)
                         tracker = FaceTracker(alpha=0.7, max_missed_frames=10)
-                        
-                        meta_path = Path(EMBEDDINGS_DIR) / "backend.json"
-                        if meta_path.exists():
-                            with open(meta_path) as _fh:
-                                meta = _json.load(_fh)
-                            trained_backend = meta.get("backend")
-                            trained_df = meta.get("deepface_model")
-                            if (str(trained_backend) != str(cfg.backend) or (cfg.backend == "deepface" and str(trained_df) != str(cfg.deepface_model))):
-                                with state.lock:
-                                    state.monitor_error = "Model mismatch! Re-train required."
-                                    state.mode = 'idle'
-                                continue
                         
                         with state.lock:
                             state.monitor_error = ""
@@ -288,12 +318,19 @@ def camera_loop():
                         ensure_dir(person_dir)
                         face_bgr = cv2.cvtColor(largest.face_rgb, cv2.COLOR_RGB2BGR)
                         fname = f"{name}_{int(time.time()*1000)}_{captured+1}.jpg"
-                        cv2.imwrite(str(person_dir / fname), face_bgr)
+                        saved_path = person_dir / fname
+                        cv2.imwrite(str(saved_path), face_bgr)
+                        last_img_size = format_size(get_file_size(saved_path))
                         captured += 1
                         with state.lock:
                             state.enroll_captured = captured
                             if captured >= target:
-                                state.enroll_message = f"Successfully enrolled {captured} face samples."
+                                elapsed = max(0.0, time.perf_counter() - state.enroll_started_at)
+                                folder_size = format_size(get_dir_size(person_dir))
+                                state.enroll_message = (
+                                    f"Successfully enrolled {captured} face samples in {elapsed:.2f}s "
+                                    f"(last: {last_img_size}, total: {folder_size})."
+                                )
                                 state.mode = 'idle'
                                 
                 with state.lock:
@@ -331,14 +368,21 @@ def camera_loop():
                         else:
                             face_crop = det.face_rgb
 
-                    if embedder and tracker and prototypes is not None and class_names is not None:
+                    if embedder and tracker and voter is not None and prototypes is not None and class_names is not None:
                         raw_embedding = embedder.embed_face(face_crop)
                         embedding = tracker.update(det.box, raw_embedding)
                         quality = face_w / max(1, frame_width)
                         effective_thr = min(0.90, max(0.40, base_threshold * (0.8 + 0.4 * quality)))
                         
                         raw_result = predict_with_prototypes(embedding, prototypes, class_names, metric=SIMILARITY_METRIC, threshold=effective_thr)
-                        raw_conf = raw_result.get("confidence", 0.0)
+                        raw_conf_val = raw_result.get("confidence", 0.0)
+                        if isinstance(raw_conf_val, (int, float, str)):
+                            try:
+                                raw_conf = float(raw_conf_val)
+                            except (TypeError, ValueError):
+                                raw_conf = 0.0
+                        else:
+                            raw_conf = 0.0
                         
                         voted_name, voted_conf = voter.vote(det.box, str(raw_result["name"]), float(raw_conf))
                         name = voted_name
@@ -431,6 +475,7 @@ def enroll():
         state.enroll_target = target
         state.enroll_captured = 0
         state.enroll_message = ""
+        state.enroll_started_at = time.perf_counter()
         
     return jsonify({"status": "ok"})
 
@@ -480,7 +525,13 @@ def get_users():
     users = []
     for f in folders:
         imgs = len(list(f.glob("*.jpg")) + list(f.glob("*.png")) + list(f.glob("*.jpeg")))
-        users.append({"name": f.name, "count": imgs})
+        total_size = get_dir_size(f)
+        users.append({
+            "name": f.name,
+            "count": imgs,
+            "size_bytes": total_size,
+            "size_human": format_size(total_size),
+        })
     return jsonify({"users": users})
 
 @app.route('/api/evaluate', methods=['POST'])
@@ -499,7 +550,11 @@ def evaluate():
                 meta = _json.load(_fh)
             trained_backend = str(meta.get("backend", backend))
             trained_df = str(meta.get("deepface_model") or df_model)
-            if (trained_backend != str(backend) or (trained_backend == "deepface" and trained_df != str(df_model))):
+            if str(backend) == "auto":
+                backend = trained_backend
+                if trained_backend == "deepface":
+                    df_model = trained_df
+            elif (trained_backend != str(backend) or (trained_backend == "deepface" and trained_df != str(df_model))):
                 return jsonify({"error": f"Model mismatch! Trained with {trained_backend.upper()}, but active model is {str(backend).upper()}."}), 400
 
         prototypes, class_names = load_accuracy_prototypes(Path(EMBEDDINGS_DIR))

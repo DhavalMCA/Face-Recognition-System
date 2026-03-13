@@ -199,7 +199,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const list = document.getElementById("users-list");
         list.innerHTML = "";
         data.users.forEach(u => {
-            list.innerHTML += `<div class="user-item"><span class="u-name">${u.name}</span><span class="u-count">${u.count} imgs</span></div>`;
+            const sizeText = u.size_human ? ` | ${u.size_human}` : "";
+            list.innerHTML += `<div class="user-item"><span class="u-name">${u.name}</span><span class="u-count">${u.count} imgs${sizeText}</span></div>`;
         });
     };
     
